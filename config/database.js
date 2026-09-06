@@ -9,23 +9,22 @@ const pool = mysql.createPool({
   port: process.env.DB_PORT,
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0
+  queueLimit: 0,
+  ssl: {
+    rejectUnauthorized: true // OBLIGATORIO para Aiven
+  }
 });
 
 // Test conexión
 pool.getConnection()
   .then(conn => {
-    console.log('✓ Conectado a MySQL exitosamente');
+    console.log('✓ Conectado a MySQL (Aiven) exitosamente con SSL');
     conn.release();
   })
   .catch(err => {
     console.error('✗ Error conectando a MySQL');
     console.error('Código:', err.code);
     console.error('Mensaje:', err.message);
-    console.error('Host configurado:', process.env.DB_HOST);
-    console.error('Puerto configurado:', process.env.DB_PORT);
-    console.error('Usuario configurado:', process.env.DB_USER);
-    console.error('Base de datos configurada:', process.env.DB_NAME);
   });
 
 module.exports = pool;
