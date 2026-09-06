@@ -11,7 +11,7 @@ const pool = mysql.createPool({
   connectionLimit: 10,
   queueLimit: 0,
   ssl: {
-    rejectUnauthorized: true // OBLIGATORIO para Aiven
+    rejectUnauthorized: false // Permitir certificados autofirmados de Aiven
   }
 });
 
@@ -22,7 +22,7 @@ pool.getConnection()
     conn.release();
   })
   .catch(err => {
-    console.error('✗ Error conectando a MySQL');
+    console.error(' Error conectando a MySQL');
     console.error('Código:', err.code);
     console.error('Mensaje:', err.message);
   });
