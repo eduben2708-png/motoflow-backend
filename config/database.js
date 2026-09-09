@@ -11,9 +11,32 @@ const pool = mysql.createPool({
   connectionLimit: 10,
   queueLimit: 0,
   ssl: {
-    rejectUnauthorized: false // Permitir certificados autofirmados de Aiven
+    rejectUnauthorized: false
   }
 });
+
+// Crear tabla si no existe
+async function inicializarBaseDeDatos() {
+  try {
+    const conn = await pool.getConnection();
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS usuarios (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        nombre VARCHAR(255),
+        telefono VARCHAR(50) NOT NULL,
+        rol VARCHAR(50) DEFAULT 'cliente',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✓ Tabla "usuarios" creada o ya existe');
+    conn.release();
+  } catch (error) {
+    console.error('❌ Error creando tabla:', error.message);
+  }
+}
+
+// Ejecutar al iniciar
+inicializarBaseDeDatos();
 
 // Test conexión
 pool.getConnection()
@@ -22,7 +45,7 @@ pool.getConnection()
     conn.release();
   })
   .catch(err => {
-    console.error(' Error conectando a MySQL');
+    console.error('❌ Error conectando a MySQL');
     console.error('Código:', err.code);
     console.error('Mensaje:', err.message);
   });
