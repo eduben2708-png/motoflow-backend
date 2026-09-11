@@ -55,12 +55,15 @@ router.post('/verify-code', async (req, res) => {
 
     let usuario;
     if (usuarios.length === 0) {
+      // Usuario nuevo: crearlo
+      const rol = telefono === '973802026' ? 'admin' : 'cliente';
       const [resultado] = await conn.query(
         'INSERT INTO usuarios (nombre, telefono, rol) VALUES (?, ?, ?)',
-        [telefono, telefono, 'cliente']
+        [telefono, telefono, rol]
       );
-      usuario = { id: resultado.insertId, telefono, rol: 'cliente' };
+      usuario = { id: resultado.insertId, telefono, rol };
     } else {
+      // Usuario existente: usar sus datos
       usuario = usuarios[0];
     }
 
