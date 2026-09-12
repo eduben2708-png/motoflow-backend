@@ -12,6 +12,7 @@ const PORT = process.env.PORT || 5000;
 app.use(cors({
   origin: [
     'http://localhost:5000',
+    'http://localhost:8000',
     'https://motoflow-web.vercel.app',
     /\.vercel\.app$/
   ],

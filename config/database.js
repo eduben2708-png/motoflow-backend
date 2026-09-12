@@ -8,17 +8,16 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME,
   port: process.env.DB_PORT,
   waitForConnections: true,
-  connectionLimit: 10,
+  connectionLimit: 20,
   queueLimit: 0,
-  ssl: {
-    rejectUnauthorized: false
-  }
+    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false
 });
 
 // Crear tabla si no existe
 async function inicializarBaseDeDatos() {
+  let conn;
   try {
-    const conn = await pool.getConnection();
+    conn = await pool.getConnection();
     await conn.query(`
       CREATE TABLE IF NOT EXISTS usuarios (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -29,9 +28,10 @@ async function inicializarBaseDeDatos() {
       )
     `);
     console.log('✓ Tabla "usuarios" creada o ya existe');
-    conn.release();
   } catch (error) {
     console.error('❌ Error creando tabla:', error.message);
+  } finally {
+    if (conn) conn.release();
   }
 }
 
