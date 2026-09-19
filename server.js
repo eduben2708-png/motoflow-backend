@@ -79,9 +79,10 @@ async function inicializarTablasDB() {
 inicializarTablasDB();
 
 async function crearTablaPedidos() {
+  let conn;
   try {
-    let conn = await pool.getConnection();
-    
+    conn = await pool.getConnection();
+
     await conn.query(`
       CREATE TABLE IF NOT EXISTS pedidos (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -109,16 +110,20 @@ async function crearTablaPedidos() {
         FOREIGN KEY (liquidacion_id) REFERENCES liquidaciones(id)
       )
     `);
-    
-    // Agregar la columna si no existe
-    await conn.query(`
-      ALTER TABLE pedidos ADD COLUMN liquidacion_id INT NULL
-    `);
-    
+
+    // Agrega la columna a instalaciones que ya tenían la tabla creada sin ella.
+    try {
+      await conn.query('ALTER TABLE pedidos ADD COLUMN liquidacion_id INT NULL');
+      console.log('✓ Columna "liquidacion_id" agregada a "pedidos"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
     console.log('✓ Tabla pedidos verificada');
-    conn.release();
   } catch (error) {
     console.error('❌ Error en tabla pedidos:', error.message);
+  } finally {
+    if (conn) conn.release();
   }
 }
 
