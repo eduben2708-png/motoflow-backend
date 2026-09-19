@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/database');
+const { idsRepartidoresBloqueados } = require('../utils/bloqueo');
 
 function normalizarTelefono(telefono) {
   let numero = String(telefono || '').replace(/\D/g, '');
@@ -19,15 +20,27 @@ function variantesTelefono(telefonoNormalizado) {
 }
 
 router.get('/', async (req, res) => {
+  let conn;
   try {
-    const conn = await pool.getConnection();
+    conn = await pool.getConnection();
     const [repartidores] = await conn.query(
       'SELECT r.*, u.nombre, u.telefono FROM repartidores r JOIN usuarios u ON r.usuario_id = u.id ORDER BY r.id DESC'
     );
-    conn.release();
-    res.json(repartidores);
+
+    // Marca a cada repartidor si está bloqueado por no haber pagado lo que
+    // debe (ver utils/bloqueo.js), para que el frontend pueda avisarle y
+    // el panel del administrador lo muestre claramente.
+    const bloqueados = await idsRepartidoresBloqueados(conn);
+    const conEstadoBloqueo = repartidores.map(repartidor => ({
+      ...repartidor,
+      bloqueado: bloqueados.has(repartidor.id)
+    }));
+
+    res.json(conEstadoBloqueo);
   } catch (error) {
     res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
   }
 });
 
@@ -112,7 +125,7 @@ router.put('/:id/aprobar', async (req, res) => {
   try {
     const { id } = req.params;
     const conn = await pool.getConnection();
-    await conn.query('UPDATE repartidores SET estado_aprobacion = "aprobado" WHERE id = ?', [id]);
+    await conn.query('UPDATE repartidores SET estado_aprobacion = ? WHERE id = ?', ['aprobado', id]);
     conn.release();
     res.json({ success: true, message: 'Repartidor aprobado' });
   } catch (error) {

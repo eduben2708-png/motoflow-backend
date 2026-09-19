@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/database');
+const { lunesDeEstaSemana } = require('../utils/bloqueo');
 
 // Guardar mensajes en memoria para testing
 const mensajes = {};
@@ -182,8 +183,15 @@ router.post('/', async (req, res) => {
            SELECT COUNT(*) FROM pedidos p
            WHERE p.repartidor_id = r.id
              AND p.estado IN ('asignado', 'en_retiro', 'en_camino')
-         ) < ?`,
-      [MAX_PEDIDOS_ACTIVOS_POR_REPARTIDOR]
+         ) < ?
+         AND NOT EXISTS (
+           SELECT 1 FROM liquidaciones l
+           WHERE l.repartidor_id = r.id
+             AND l.direccion_pago = 'repartidor_paga'
+             AND l.estado != 'pagado'
+             AND l.fecha_fin < ?
+         )`,
+      [MAX_PEDIDOS_ACTIVOS_POR_REPARTIDOR, lunesDeEstaSemana()]
     );
 
     let repartidorAsignado = null;
