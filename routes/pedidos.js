@@ -3,9 +3,6 @@ const router = express.Router();
 const pool = require('../config/database');
 const { lunesDeEstaSemana } = require('../utils/bloqueo');
 
-// Guardar mensajes en memoria para testing
-const mensajes = {};
-
 function calcularDetalleTarifa(distanciaKm) {
   const distancia = Number(distanciaKm);
 
@@ -302,37 +299,64 @@ router.put('/:id', async (req, res) => {
 
 // GET /api/pedidos/:id/mensajes
 router.get('/:id/mensajes', async (req, res) => {
+  let conn;
   try {
     const { id } = req.params;
-    res.json(mensajes[id] || []);
+    conn = await pool.getConnection();
+    const [mensajes] = await conn.query(
+      `SELECT m.id, m.usuario_id, m.mensaje, m.created_at, u.nombre AS usuario_nombre
+       FROM mensajes m
+       LEFT JOIN usuarios u ON m.usuario_id = u.id
+       WHERE m.pedido_id = ?
+       ORDER BY m.created_at ASC, m.id ASC`,
+      [id]
+    );
+
+    res.json(mensajes.map(m => ({
+      id: m.id,
+      usuario_id: m.usuario_id,
+      usuario_nombre: m.usuario_nombre,
+      mensaje: m.mensaje,
+      timestamp: new Date(m.created_at).toLocaleTimeString('es-PY', { hour: '2-digit', minute: '2-digit' })
+    })));
   } catch (error) {
     res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
   }
 });
 
 // POST /api/pedidos/:id/mensajes
 router.post('/:id/mensajes', async (req, res) => {
+  let conn;
   try {
     const { id } = req.params;
     const { usuario_id, mensaje } = req.body;
-    
-    if (!mensajes[id]) {
-      mensajes[id] = [];
-    }
-    
-    const nuevoMensaje = {
-      id: Date.now(),
+    const texto = String(mensaje || '').trim();
+
+    if (!usuario_id) return res.status(400).json({ error: 'Falta identificar al usuario' });
+    if (!texto) return res.status(400).json({ error: 'El mensaje no puede estar vacío' });
+
+    conn = await pool.getConnection();
+    const [resultado] = await conn.query(
+      'INSERT INTO mensajes (pedido_id, usuario_id, mensaje) VALUES (?, ?, ?)',
+      [id, usuario_id, texto]
+    );
+    const [[usuario]] = await conn.query('SELECT nombre FROM usuarios WHERE id = ?', [usuario_id]);
+
+    console.log(`💬 Mensaje en pedido #${id}: ${texto}`);
+
+    res.json({
+      id: resultado.insertId,
       usuario_id,
-      mensaje,
-      timestamp: new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })
-    };
-    
-    mensajes[id].push(nuevoMensaje);
-    console.log(`💬 Mensaje en pedido #${id}: ${mensaje}`);
-    
-    res.json(nuevoMensaje);
+      usuario_nombre: usuario?.nombre || null,
+      mensaje: texto,
+      timestamp: new Date().toLocaleTimeString('es-PY', { hour: '2-digit', minute: '2-digit' })
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
   }
 });
 

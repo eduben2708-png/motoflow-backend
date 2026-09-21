@@ -158,8 +158,34 @@ async function crearTablaLiquidaciones() {
   }
 }
 
+async function crearTablaMensajes() {
+  let conn;
+  try {
+    conn = await pool.getConnection();
+
+    // Sin FOREIGN KEY hacia pedidos a propósito: esta tabla se crea en paralelo
+    // con crearTablaPedidos() y no hay garantía de qué termine primero.
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS mensajes (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        pedido_id INT NOT NULL,
+        usuario_id INT NOT NULL,
+        mensaje TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_mensajes_pedido (pedido_id)
+      )
+    `);
+    console.log('✓ Tabla mensajes verificada');
+  } catch (error) {
+    console.error('❌ Error en tabla mensajes:', error.message);
+  } finally {
+    if (conn) conn.release();
+  }
+}
+
 crearTablaPedidos();
 crearTablaLiquidaciones();
+crearTablaMensajes();
 
 module.exports = app;
 
