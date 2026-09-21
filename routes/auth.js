@@ -319,6 +319,23 @@ router.get('/estadisticas-registro', async (req, res) => {
   }
 });
 
+// GET /api/auth/clientes - Listado de cuentas de clientes, para que el
+// administrador vea quiénes son (no solo el número).
+router.get('/clientes', async (req, res) => {
+  let conn;
+  try {
+    conn = await pool.getConnection();
+    const [clientes] = await conn.query(
+      `SELECT id, nombre, telefono, created_at FROM usuarios WHERE rol = 'cliente' ORDER BY id DESC`
+    );
+    res.json(clientes);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
 // PUT /api/auth/cambiar-rol
 router.put('/cambiar-rol', async (req, res) => {
   try {
