@@ -36,6 +36,12 @@ function calcularDetalleTarifa(distanciaKm) {
   };
 }
 
+// Radio máximo (en km) desde la ubicación del repartidor hasta el punto de
+// retiro para que un pedido nuevo se le asigne automáticamente. Si no hay
+// ningún repartidor aprobado, con GPS activo y sin bloqueo dentro de este
+// radio, el pedido queda sin asignar y el administrador lo asigna a mano.
+const RADIO_MAXIMO_ASIGNACION_KM = 8;
+
 function distanciaEntrePuntosKm(lat1, lng1, lat2, lng2) {
   const radioTierraKm = 6371;
   const aRad = grados => grados * Math.PI / 180;
@@ -52,7 +58,11 @@ function distanciaEntrePuntosKm(lat1, lng1, lat2, lng2) {
 router.get('/', async (req, res) => {
   try {
     const conn = await pool.getConnection();
-    const [pedidos] = await conn.query('SELECT * FROM pedidos');
+    const [pedidos] = await conn.query(
+      `SELECT p.*, uc.nombre AS cliente_nombre, uc.telefono AS cliente_telefono
+       FROM pedidos p
+       LEFT JOIN usuarios uc ON p.cliente_id = uc.id`
+    );
     conn.release();
     res.json(pedidos);
   } catch (error) {
@@ -101,7 +111,10 @@ router.get('/historial', async (req, res) => {
 
     conn = await pool.getConnection();
     const [pedidos] = await conn.query(
-      `SELECT * FROM pedidos ${whereClause} ORDER BY fecha_creacion DESC`,
+      `SELECT p.*, uc.nombre AS cliente_nombre, uc.telefono AS cliente_telefono
+       FROM pedidos p
+       LEFT JOIN usuarios uc ON p.cliente_id = uc.id
+       ${whereClause} ORDER BY p.fecha_creacion DESC`,
       valores
     );
 
@@ -207,7 +220,11 @@ router.post('/', async (req, res) => {
             Number(repartidor.ubicacion_lng)
           )
         }))
-        .sort((a, b) => a.distanciaKm - b.distanciaKm)[0];
+        // Solo se asignan automáticamente los repartidores que están dentro
+        // del radio de retiro permitido. Los que están más lejos no reciben
+        // este pedido (aunque estén disponibles).
+        .filter(repartidor => repartidor.distanciaKm <= RADIO_MAXIMO_ASIGNACION_KM)
+        .sort((a, b) => a.distanciaKm - b.distanciaKm)[0] || null;
 
       await conn.query(
         'UPDATE pedidos SET repartidor_id = ?, estado = ? WHERE id = ?',

@@ -296,6 +296,29 @@ router.put('/completar-registro', async (req, res) => {
   }
 });
 
+// GET /api/auth/estadisticas-registro - Cuántas cuentas de cada tipo hay
+// registradas en total, para el panel del administrador.
+router.get('/estadisticas-registro', async (req, res) => {
+  let conn;
+  try {
+    conn = await pool.getConnection();
+    const [filas] = await conn.query('SELECT rol, COUNT(*) AS total FROM usuarios GROUP BY rol');
+
+    const conteo = { clientes: 0, repartidores: 0, admin: 0 };
+    filas.forEach(fila => {
+      if (fila.rol === 'cliente') conteo.clientes = Number(fila.total);
+      else if (fila.rol === 'repartidor') conteo.repartidores = Number(fila.total);
+      else if (fila.rol === 'admin') conteo.admin = Number(fila.total);
+    });
+
+    res.json(conteo);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
 // PUT /api/auth/cambiar-rol
 router.put('/cambiar-rol', async (req, res) => {
   try {
