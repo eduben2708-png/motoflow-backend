@@ -28,6 +28,7 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/pedidos', require('./routes/pedidos'));
 app.use('/api/repartidores', require('./routes/repartidores'));
 app.use('/api/liquidaciones', require('./routes/liquidaciones'));
+app.use('/api/lugares', require('./routes/lugares'));
 
 // Error handling
 app.use((err, req, res, next) => {
