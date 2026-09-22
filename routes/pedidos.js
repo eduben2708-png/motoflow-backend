@@ -223,10 +223,15 @@ router.post('/', async (req, res) => {
         .filter(repartidor => repartidor.distanciaKm <= RADIO_MAXIMO_ASIGNACION_KM)
         .sort((a, b) => a.distanciaKm - b.distanciaKm)[0] || null;
 
-      await conn.query(
-        'UPDATE pedidos SET repartidor_id = ?, estado = ? WHERE id = ?',
-        [repartidorAsignado.id, 'asignado', result.insertId]
-      );
+      // Puede que haya repartidores disponibles pero que ninguno esté dentro
+      // del radio permitido: en ese caso el pedido queda sin asignar, igual
+      // que cuando no hay repartidores disponibles.
+      if (repartidorAsignado) {
+        await conn.query(
+          'UPDATE pedidos SET repartidor_id = ?, estado = ? WHERE id = ?',
+          [repartidorAsignado.id, 'asignado', result.insertId]
+        );
+      }
     }
 
     res.json({
