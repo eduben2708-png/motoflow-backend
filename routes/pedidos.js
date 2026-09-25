@@ -343,6 +343,19 @@ router.post('/:id/mensajes', async (req, res) => {
     if (!texto) return res.status(400).json({ error: 'El mensaje no puede estar vacío' });
 
     conn = await pool.getConnection();
+
+    // Una vez que el pedido se entrega (o se cancela) ya no tiene sentido que
+    // cliente y repartidor sigan escribiéndose. Este chequeo es la barrera
+    // real: el botón de chat se oculta en el frontend, pero esto evita que
+    // alguien mande el mensaje pegándole directo a la API.
+    const [[pedido]] = await conn.query('SELECT estado FROM pedidos WHERE id = ?', [id]);
+    if (!pedido) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    if (['entregado', 'cancelado'].includes(pedido.estado)) {
+      return res.status(403).json({ error: 'Este pedido ya fue entregado: el chat quedó cerrado.' });
+    }
+
     const [resultado] = await conn.query(
       'INSERT INTO mensajes (pedido_id, usuario_id, mensaje) VALUES (?, ?, ?)',
       [id, usuario_id, texto]
