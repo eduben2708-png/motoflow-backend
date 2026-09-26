@@ -132,8 +132,14 @@ router.post('/', async (req, res) => {
       cliente_id, tipo, origen_direccion, destino_direccion,
       origen_nombre, destino_nombre, // Se agregan nombres/referencias comerciales opcionales
       distancia_km, monto_compra,
-      origen_lat, origen_lng, destino_lat, destino_lng
+      origen_lat, origen_lng, destino_lat, destino_lng,
+      telefono_destinatario
     } = req.body;
+
+    // Teléfono opcional de quien recibe el pedido (lo carga el vendedor a
+    // partir del contacto que le pasó su propio cliente), para que el
+    // repartidor pueda llamarlo con un toque si no encuentra la dirección.
+    const telefonoDestinatario = String(telefono_destinatario || '').replace(/\D/g, '').slice(0, 20) || null;
 
     if (!['delivery', 'retiro', 'encargo'].includes(tipo)) {
       return res.status(400).json({ error: 'Tipo de servicio inválido' });
@@ -168,14 +174,14 @@ router.post('/', async (req, res) => {
         cliente_id, tipo, origen_direccion, destino_direccion,
         origen_lat, origen_lng, destino_lat, destino_lng, monto, tipo_pago,
         distancia_km, tarifa_base, km_adicionales, costo_km_adicionales,
-        monto_compra, comision_encargo, tarifa_servicio, estado
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        monto_compra, comision_encargo, tarifa_servicio, estado, telefono_destinatario
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         cliente_id, tipo, dirOrigenFinal, dirDestinoFinal,
         origenLat, origenLng, destinoLat, destinoLng, montoTotal, 'pendiente',
         detalleTarifa.distanciaKm, detalleTarifa.tarifaBase, detalleTarifa.kmAdicionales,
         detalleTarifa.costoKmAdicionales, montoCompra, comisionEncargo,
-        detalleTarifa.tarifaServicio, 'pendiente'
+        detalleTarifa.tarifaServicio, 'pendiente', telefonoDestinatario
       ]
     );
 

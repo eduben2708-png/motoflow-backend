@@ -108,6 +108,7 @@ async function crearTablaPedidos() {
         estado VARCHAR(50) DEFAULT 'pendiente',
         fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         liquidacion_id INT NULL,
+        telefono_destinatario VARCHAR(20) NULL,
         FOREIGN KEY (liquidacion_id) REFERENCES liquidaciones(id)
       )
     `);
@@ -116,6 +117,16 @@ async function crearTablaPedidos() {
     try {
       await conn.query('ALTER TABLE pedidos ADD COLUMN liquidacion_id INT NULL');
       console.log('✓ Columna "liquidacion_id" agregada a "pedidos"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
+    // Teléfono de contacto de quien recibe el pedido (lo carga el cliente que
+    // vende, para que el repartidor pueda llamarlo si no encuentra la
+    // dirección). Es opcional, por eso NULL.
+    try {
+      await conn.query('ALTER TABLE pedidos ADD COLUMN telefono_destinatario VARCHAR(20) NULL');
+      console.log('✓ Columna "telefono_destinatario" agregada a "pedidos"');
     } catch (error) {
       // Ya existe la columna: es esperable en cada reinicio a partir del primero.
     }
