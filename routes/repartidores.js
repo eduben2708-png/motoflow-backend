@@ -129,6 +129,61 @@ router.post('/', async (req, res) => {
   }
 });
 
+// PUT /:id - El admin corrige el "catastro" (datos) de un repartidor ya
+// registrado: nombre y teléfono viven en usuarios, CI/placa/moto en
+// repartidores, así que se actualizan las dos tablas juntas.
+router.put('/:id', async (req, res) => {
+  let conn;
+  try {
+    const { id } = req.params;
+    const { nombre, ci, placa, marca_moto, modelo_moto } = req.body;
+    const telefono = normalizarTelefono(req.body.telefono);
+
+    if (!nombre || !telefono || !ci || !placa) {
+      return res.status(400).json({ error: 'Nombre, teléfono de 9 dígitos, CI y placa son obligatorios' });
+    }
+
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    const [[repartidor]] = await conn.query('SELECT usuario_id FROM repartidores WHERE id = ?', [id]);
+    if (!repartidor) {
+      await conn.rollback();
+      return res.status(404).json({ error: 'Repartidor no encontrado' });
+    }
+
+    const [telefonosEnUso] = await conn.query(
+      'SELECT id FROM usuarios WHERE telefono IN (?, ?, ?, ?) AND id != ?',
+      [...variantesTelefono(telefono), repartidor.usuario_id]
+    );
+    const [cisEnUso] = await conn.query('SELECT id FROM repartidores WHERE ci = ? AND id != ?', [ci, id]);
+    const [placasEnUso] = await conn.query('SELECT id FROM repartidores WHERE placa = ? AND id != ?', [placa, id]);
+
+    if (telefonosEnUso.length) {
+      await conn.rollback();
+      return res.status(409).json({ error: 'Ese teléfono ya pertenece a otra cuenta' });
+    }
+    if (cisEnUso.length || placasEnUso.length) {
+      await conn.rollback();
+      return res.status(409).json({ error: 'La CI o la placa ya está registrada para otro repartidor' });
+    }
+
+    await conn.query('UPDATE usuarios SET nombre = ?, telefono = ? WHERE id = ?', [nombre, telefono, repartidor.usuario_id]);
+    await conn.query(
+      'UPDATE repartidores SET ci = ?, placa = ?, marca_moto = ?, modelo_moto = ? WHERE id = ?',
+      [ci, placa.toUpperCase(), marca_moto || null, modelo_moto || null, id]
+    );
+
+    await conn.commit();
+    res.json({ success: true });
+  } catch (error) {
+    if (conn) await conn.rollback();
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
 router.put('/:id/gps', async (req, res) => {
   try {
     const { id } = req.params;
