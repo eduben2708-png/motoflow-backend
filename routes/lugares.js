@@ -73,4 +73,80 @@ router.get('/buscar', async (req, res) => {
   }
 });
 
+// POST /resolver-link - Nuestro cliente (que muchas veces es a la vez
+// vendedor) recibe la ubicación de SU propio cliente como un link de
+// Google Maps (compartido por WhatsApp, por ejemplo) y quiere usarla directo
+// como punto de retiro/entrega en vez de tener que buscar la dirección nueva.
+// Los links cortos (maps.app.goo.gl) no traen las coordenadas en la URL: hay
+// que seguir la redirección para llegar a la URL final, que sí las tiene.
+const DOMINIOS_MAPS_PERMITIDOS = ['google.com', 'goo.gl', 'g.co'];
+
+function esLinkDeGoogleMaps(url) {
+  try {
+    const { hostname, protocol } = new URL(url);
+    if (protocol !== 'http:' && protocol !== 'https:') return false;
+    return DOMINIOS_MAPS_PERMITIDOS.some((dominio) => hostname === dominio || hostname.endsWith(`.${dominio}`));
+  } catch {
+    return false;
+  }
+}
+
+function extraerCoordenadasDeTexto(texto) {
+  const patrones = [
+    /@(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)/,        // .../@-25.5097,-54.6111,17z
+    /[?&]q=(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)/,    // ?q=-25.5097,-54.6111
+    /!3d(-?\d{1,2}\.\d+)!4d(-?\d{1,3}\.\d+)/      // datos internos de Google (3d=lat, 4d=lng)
+  ];
+
+  for (const patron of patrones) {
+    const coincidencia = texto.match(patron);
+    if (coincidencia) {
+      return { lat: Number(coincidencia[1]), lng: Number(coincidencia[2]) };
+    }
+  }
+  return null;
+}
+
+router.post('/resolver-link', async (req, res) => {
+  const url = String(req.body.url || '').trim();
+
+  if (!url) {
+    return res.status(400).json({ error: 'Pegá un link de ubicación' });
+  }
+
+  if (!esLinkDeGoogleMaps(url)) {
+    return res.status(400).json({ error: 'Ese link no es de Google Maps. Pegá el link tal cual te lo compartieron.' });
+  }
+
+  try {
+    // fetch sigue redirecciones automáticamente, y "response.url" queda con
+    // la URL final ya resuelta (ahí es donde vienen las coordenadas en los
+    // links cortos tipo maps.app.goo.gl).
+    const respuesta = await fetch(url, {
+      redirect: 'follow',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
+      }
+    });
+    const urlFinal = respuesta.url || url;
+
+    let coordenadas = extraerCoordenadasDeTexto(urlFinal);
+    if (!coordenadas) {
+      // Algunos links resuelven a una página en vez de a una URL con las
+      // coordenadas a la vista: se busca el mismo patrón dentro del HTML.
+      const cuerpo = await respuesta.text();
+      coordenadas = extraerCoordenadasDeTexto(cuerpo);
+    }
+
+    if (!coordenadas) {
+      return res.status(422).json({ error: 'No se pudieron leer las coordenadas de ese link. Probá pegar el link completo de Google Maps, o buscar la dirección a mano.' });
+    }
+
+    res.json(coordenadas);
+  } catch (error) {
+    console.error('Error al resolver link de ubicación:', error.message);
+    res.status(500).json({ error: 'No se pudo abrir ese link. Verificá que sea un link válido de Google Maps.' });
+  }
+});
+
 module.exports = router;
