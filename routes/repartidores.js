@@ -57,27 +57,51 @@ router.post('/registro', async (req, res) => {
     conn = await pool.getConnection();
     await conn.beginTransaction();
 
-    const [usuarios] = await conn.query(
+    const [usuariosExistentes] = await conn.query(
       'SELECT id FROM usuarios WHERE telefono IN (?, ?, ?, ?)',
       variantesTelefono(telefono)
     );
     const [cis] = await conn.query('SELECT id FROM repartidores WHERE ci = ?', [ci]);
     const [placas] = await conn.query('SELECT id FROM repartidores WHERE placa = ?', [placa]);
 
-    if (usuarios.length || cis.length || placas.length) {
+    if (cis.length || placas.length) {
       await conn.rollback();
-      return res.status(409).json({ error: 'El teléfono, CI o placa ya está registrado' });
+      return res.status(409).json({ error: 'La CI o la placa ya está registrada para otro repartidor' });
     }
 
-    const [usuario] = await conn.query(
-      'INSERT INTO usuarios (nombre, telefono, rol) VALUES (?, ?, ?)',
-      [nombre, telefono, 'repartidor']
-    );
+    let usuarioId;
+
+    if (usuariosExistentes.length) {
+      // El teléfono ya tiene una cuenta (por ejemplo, alguien que ya usaba
+      // la app como cliente y ahora también va a repartir). En vez de
+      // rechazarlo, reutilizamos esa misma cuenta -conserva su historial y
+      // sigue entrando con la contraseña que ya tenía- en lugar de exigir
+      // un número distinto.
+      usuarioId = usuariosExistentes[0].id;
+
+      const [repartidorExistente] = await conn.query(
+        'SELECT id FROM repartidores WHERE usuario_id = ?',
+        [usuarioId]
+      );
+      if (repartidorExistente.length) {
+        await conn.rollback();
+        return res.status(409).json({ error: 'Ese número ya está registrado como repartidor' });
+      }
+
+      await conn.query('UPDATE usuarios SET nombre = ? WHERE id = ?', [nombre, usuarioId]);
+    } else {
+      const [usuario] = await conn.query(
+        'INSERT INTO usuarios (nombre, telefono, rol) VALUES (?, ?, ?)',
+        [nombre, telefono, 'repartidor']
+      );
+      usuarioId = usuario.insertId;
+    }
+
     const [repartidor] = await conn.query(
       `INSERT INTO repartidores (
         usuario_id, ci, placa, marca_moto, modelo_moto, estado_aprobacion
       ) VALUES (?, ?, ?, ?, ?, 'pendiente')`,
-      [usuario.insertId, ci, placa.toUpperCase(), marca_moto || null, modelo_moto || null]
+      [usuarioId, ci, placa.toUpperCase(), marca_moto || null, modelo_moto || null]
     );
 
     await conn.commit();
