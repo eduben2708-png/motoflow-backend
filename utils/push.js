@@ -57,7 +57,17 @@ async function enviarPushAUsuario(usuarioId, payload) {
       };
 
       try {
-        await webpush.sendNotification(suscripcionPush, JSON.stringify(payload));
+        // urgency: 'high' le dice a Android que despierte el celular y
+        // entregue el aviso ya mismo, en vez de esperar a que salga del
+        // modo de ahorro de batería (que es lo que probablemente estaba
+        // pasando: el servidor mandaba bien el push, pero Android lo
+        // dejaba en cola por prioridad normal). TTL corto para que, si por
+        // algún motivo no se entrega al toque, no quede pendiente mucho
+        // tiempo y llegue "tarde" con un pedido que ya se reasignó.
+        await webpush.sendNotification(suscripcionPush, JSON.stringify(payload), {
+          urgency: 'high',
+          TTL: 60
+        });
         console.log(`✓ Push entregado al servicio de notificaciones (usuario ${usuarioId}, suscripción ${suscripcion.id}).`);
       } catch (error) {
         if (error.statusCode === 404 || error.statusCode === 410) {
