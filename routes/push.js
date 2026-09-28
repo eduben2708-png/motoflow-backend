@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/database');
+const { enviarPushAUsuario } = require('../utils/push');
 
 // GET /vapid-public-key - Le da al frontend la clave pública VAPID para que
 // arme la suscripción push. Así, si algún día hay que rotar las claves, no
@@ -59,6 +60,46 @@ router.post('/desuscribir', async (req, res) => {
     res.status(500).json({ error: error.message });
   } finally {
     if (conn) conn.release();
+  }
+});
+
+// --- TEMPORAL: solo para diagnosticar por qué no llegan las notificaciones
+// push. No expone las claves p256dh/auth. Se puede borrar una vez que
+// quede confirmado que todo funciona. ---
+
+// GET /debug-suscripciones - Muestra qué dispositivos quedaron guardados,
+// para confirmar si la suscripción del celular llegó a guardarse o no.
+router.get('/debug-suscripciones', async (req, res) => {
+  let conn;
+  try {
+    conn = await pool.getConnection();
+    const [filas] = await conn.query(
+      'SELECT id, usuario_id, endpoint, created_at FROM push_subscriptions ORDER BY id DESC'
+    );
+    res.json(filas.map(f => ({
+      id: f.id,
+      usuario_id: f.usuario_id,
+      endpoint_preview: f.endpoint.slice(0, 70) + '...',
+      created_at: f.created_at
+    })));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// POST /probar/:usuarioId - Manda un push de prueba directo a un usuario,
+// sin necesidad de crear un pedido real, para ver si la entrega funciona.
+router.post('/probar/:usuarioId', async (req, res) => {
+  try {
+    await enviarPushAUsuario(Number(req.params.usuarioId), {
+      titulo: 'Prueba de JMMotocourier',
+      cuerpo: 'Si ves esto, las notificaciones push están funcionando.'
+    });
+    res.json({ success: true, mensaje: 'Push de prueba enviado (revisá el celular).' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 

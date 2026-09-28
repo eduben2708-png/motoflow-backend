@@ -45,6 +45,8 @@ async function enviarPushAUsuario(usuarioId, payload) {
       [usuarioId]
     );
 
+    console.log(`🔔 Push: usuario ${usuarioId} tiene ${suscripciones.length} dispositivo(s) suscrito(s).`);
+
     for (const suscripcion of suscripciones) {
       const suscripcionPush = {
         endpoint: suscripcion.endpoint,
@@ -56,11 +58,16 @@ async function enviarPushAUsuario(usuarioId, payload) {
 
       try {
         await webpush.sendNotification(suscripcionPush, JSON.stringify(payload));
+        console.log(`✓ Push entregado al servicio de notificaciones (usuario ${usuarioId}, suscripción ${suscripcion.id}).`);
       } catch (error) {
         if (error.statusCode === 404 || error.statusCode === 410) {
           await conn.query('DELETE FROM push_subscriptions WHERE id = ?', [suscripcion.id]);
+          console.log(`Suscripción ${suscripcion.id} vencida (status ${error.statusCode}): se borró de la base.`);
         } else {
-          console.error('Error al enviar notificación push:', error.message);
+          console.error(
+            `Error al enviar notificación push (usuario ${usuarioId}, suscripción ${suscripcion.id}):`,
+            error.statusCode, error.body || error.message
+          );
         }
       }
     }
