@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../config/database');
 const { lunesDeEstaSemana } = require('../utils/bloqueo');
+const { enviarPushAUsuario } = require('../utils/push');
 
 function calcularDetalleTarifa(distanciaKm) {
   const distancia = Number(distanciaKm);
@@ -189,7 +190,7 @@ router.post('/', async (req, res) => {
     const MAX_PEDIDOS_ACTIVOS_POR_REPARTIDOR = 3;
 
     const [repartidoresDisponibles] = await conn.query(
-      `SELECT r.id, r.ubicacion_lat, r.ubicacion_lng
+      `SELECT r.id, r.usuario_id, r.ubicacion_lat, r.ubicacion_lng
        FROM repartidores r
        WHERE r.estado_aprobacion = 'aprobado'
          AND r.gps_activo = TRUE
@@ -237,6 +238,14 @@ router.post('/', async (req, res) => {
           'UPDATE pedidos SET repartidor_id = ?, estado = ? WHERE id = ?',
           [repartidorAsignado.id, 'asignado', result.insertId]
         );
+
+        // No se espera la respuesta del push para no demorarle la
+        // confirmación del pedido al cliente que lo está creando.
+        enviarPushAUsuario(repartidorAsignado.usuario_id, {
+          titulo: 'JMMotocourier',
+          cuerpo: `¡Nuevo pedido asignado! Pedido #${result.insertId}.`,
+          pedidoId: result.insertId
+        }).catch(error => console.error('Error al enviar push de asignación automática:', error.message));
       }
     }
 
@@ -298,8 +307,19 @@ router.put('/:id', async (req, res) => {
     
     if (repartidor_id && estado === 'asignado') {
       console.log(`🔔 NOTIFICACIÓN: Pedido #${id} asignado a repartidor ${repartidor_id}`);
+
+      // Asignación manual desde el panel del administrador: también dispara
+      // el push, igual que la asignación automática al crear el pedido.
+      const [[repartidorInfo]] = await conn.query('SELECT usuario_id FROM repartidores WHERE id = ?', [repartidor_id]);
+      if (repartidorInfo) {
+        enviarPushAUsuario(repartidorInfo.usuario_id, {
+          titulo: 'JMMotocourier',
+          cuerpo: `¡Nuevo pedido asignado! Pedido #${id}.`,
+          pedidoId: id
+        }).catch(error => console.error('Error al enviar push de asignación manual:', error.message));
+      }
     }
-    
+
     res.json({ success: true, message: 'Pedido actualizado' });
   } catch (error) {
     res.status(500).json({ error: error.message });

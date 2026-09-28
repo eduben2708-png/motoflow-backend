@@ -29,6 +29,7 @@ app.use('/api/pedidos', require('./routes/pedidos'));
 app.use('/api/repartidores', require('./routes/repartidores'));
 app.use('/api/liquidaciones', require('./routes/liquidaciones'));
 app.use('/api/lugares', require('./routes/lugares'));
+app.use('/api/push', require('./routes/push'));
 
 // Error handling
 app.use((err, req, res, next) => {
@@ -195,9 +196,38 @@ async function crearTablaMensajes() {
   }
 }
 
+async function crearTablaPushSubscriptions() {
+  let conn;
+  try {
+    conn = await pool.getConnection();
+
+    // Guarda, por dispositivo (endpoint), la suscripción push de cada
+    // repartidor. Con esto el servidor sabe a qué "buzón" del navegador
+    // mandarle el aviso de un pedido nuevo, sin que el celular necesite
+    // tener la app abierta.
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS push_subscriptions (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        usuario_id INT NOT NULL,
+        endpoint VARCHAR(500) UNIQUE NOT NULL,
+        p256dh VARCHAR(255) NOT NULL,
+        auth VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_push_usuario (usuario_id)
+      )
+    `);
+    console.log('✓ Tabla push_subscriptions verificada');
+  } catch (error) {
+    console.error('❌ Error en tabla push_subscriptions:', error.message);
+  } finally {
+    if (conn) conn.release();
+  }
+}
+
 crearTablaPedidos();
 crearTablaLiquidaciones();
 crearTablaMensajes();
+crearTablaPushSubscriptions();
 
 module.exports = app;
 
