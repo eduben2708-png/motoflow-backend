@@ -110,6 +110,7 @@ async function crearTablaPedidos() {
         fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         liquidacion_id INT NULL,
         telefono_destinatario VARCHAR(20) NULL,
+        recargo_centro DECIMAL(10, 2) DEFAULT 0,
         FOREIGN KEY (liquidacion_id) REFERENCES liquidaciones(id)
       )
     `);
@@ -128,6 +129,17 @@ async function crearTablaPedidos() {
     try {
       await conn.query('ALTER TABLE pedidos ADD COLUMN telefono_destinatario VARCHAR(20) NULL');
       console.log('✓ Columna "telefono_destinatario" agregada a "pedidos"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
+    // Recargo fijo cuando el punto de retiro cae dentro del centro de
+    // Ciudad del Este (ver RECARGO_CENTRO en routes/pedidos.js). Se guarda
+    // aparte del resto de la tarifa para que quede claro en el historial
+    // por qué un pedido costó más.
+    try {
+      await conn.query('ALTER TABLE pedidos ADD COLUMN recargo_centro DECIMAL(10, 2) DEFAULT 0');
+      console.log('✓ Columna "recargo_centro" agregada a "pedidos"');
     } catch (error) {
       // Ya existe la columna: es esperable en cada reinicio a partir del primero.
     }

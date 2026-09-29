@@ -52,6 +52,20 @@ function distanciaEntrePuntosKm(lat1, lng1, lat2, lng2) {
   return radioTierraKm * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 
+// Recargo por retiro en el centro de Ciudad del Este: la zona más
+// comercial (cerca de Av. San Blas / Monseñor Rodríguez) tiene más
+// tránsito y demora más el retiro, así que se cobra un extra fijo cuando
+// el punto de retiro cae dentro de este radio. Mismo punto que ya se usa
+// para priorizar resultados de búsqueda de direcciones (ver lugares.js).
+const CENTRO_CDE = { lat: -25.5097, lng: -54.6111 };
+const RADIO_CENTRO_KM = 1;
+const RECARGO_CENTRO = 5000;
+
+function esRetiroEnElCentro(lat, lng) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  return distanciaEntrePuntosKm(lat, lng, CENTRO_CDE.lat, CENTRO_CDE.lng) <= RADIO_CENTRO_KM;
+}
+
 // GET /api/pedidos
 router.get('/', async (req, res) => {
   try {
@@ -162,7 +176,8 @@ router.post('/', async (req, res) => {
     }
 
     const comisionEncargo = tipo === 'encargo' ? Math.round(montoCompra * 0.02) : 0;
-    const montoTotal = detalleTarifa.tarifaServicio + montoCompra + comisionEncargo;
+    const recargoCentro = esRetiroEnElCentro(origenLat, origenLng) ? RECARGO_CENTRO : 0;
+    const montoTotal = detalleTarifa.tarifaServicio + montoCompra + comisionEncargo + recargoCentro;
 
     conn = await pool.getConnection();
 
@@ -175,14 +190,16 @@ router.post('/', async (req, res) => {
         cliente_id, tipo, origen_direccion, destino_direccion,
         origen_lat, origen_lng, destino_lat, destino_lng, monto, tipo_pago,
         distancia_km, tarifa_base, km_adicionales, costo_km_adicionales,
-        monto_compra, comision_encargo, tarifa_servicio, estado, telefono_destinatario
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        monto_compra, comision_encargo, tarifa_servicio, estado, telefono_destinatario,
+        recargo_centro
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         cliente_id, tipo, dirOrigenFinal, dirDestinoFinal,
         origenLat, origenLng, destinoLat, destinoLng, montoTotal, 'pendiente',
         detalleTarifa.distanciaKm, detalleTarifa.tarifaBase, detalleTarifa.kmAdicionales,
         detalleTarifa.costoKmAdicionales, montoCompra, comisionEncargo,
-        detalleTarifa.tarifaServicio, 'pendiente', telefonoDestinatario
+        detalleTarifa.tarifaServicio, 'pendiente', telefonoDestinatario,
+        recargoCentro
       ]
     );
 
@@ -255,6 +272,7 @@ router.post('/', async (req, res) => {
       ...detalleTarifa,
       montoCompra,
       comisionEncargo,
+      recargoCentro,
       repartidor_id: repartidorAsignado?.id || null,
       distancia_repartidor_km: repartidorAsignado ? Number(repartidorAsignado.distanciaKm.toFixed(2)) : null
     });
