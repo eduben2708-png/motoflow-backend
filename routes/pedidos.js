@@ -4,6 +4,30 @@ const pool = require('../config/database');
 const { lunesDeEstaSemana } = require('../utils/bloqueo');
 const { enviarPushAUsuario } = require('../utils/push');
 
+// Horario de atención: fuera de estos horarios no se aceptan pedidos
+// nuevos. Los pedidos que ya estaban en curso (asignados, en camino, etc.)
+// siguen su trámite normal — esto solo bloquea la creación de pedidos.
+const HORA_APERTURA_MINUTOS = 7 * 60 + 30; // 07:30
+const HORA_CIERRE_MINUTOS = 17 * 60 + 30; // 17:30
+
+function horaActualEnParaguay() {
+  const formateador = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Asuncion',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  });
+  const partes = formateador.formatToParts(new Date());
+  const hora = Number(partes.find(p => p.type === 'hour').value);
+  const minuto = Number(partes.find(p => p.type === 'minute').value);
+  return hora * 60 + minuto;
+}
+
+function dentroDelHorarioDeServicio() {
+  const minutosActuales = horaActualEnParaguay();
+  return minutosActuales >= HORA_APERTURA_MINUTOS && minutosActuales < HORA_CIERRE_MINUTOS;
+}
+
 function calcularDetalleTarifa(distanciaKm) {
   const distancia = Number(distanciaKm);
 
@@ -143,6 +167,14 @@ router.post('/', async (req, res) => {
   let conn;
 
   try {
+    // Se valida el horario ANTES que cualquier otra cosa: no tiene sentido
+    // seguir calculando tarifas si de entrada no se va a aceptar el pedido.
+    if (!dentroDelHorarioDeServicio()) {
+      return res.status(403).json({
+        error: 'Fuera de horario de atención: el servicio funciona de 07:30 a 17:30 hs.'
+      });
+    }
+
     const {
       cliente_id, tipo, origen_direccion, destino_direccion,
       origen_nombre, destino_nombre, // Se agregan nombres/referencias comerciales opcionales
