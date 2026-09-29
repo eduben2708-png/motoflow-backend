@@ -28,6 +28,15 @@ function dentroDelHorarioDeServicio() {
   return minutosActuales >= HORA_APERTURA_MINUTOS && minutosActuales < HORA_CIERRE_MINUTOS;
 }
 
+// Interruptor para activar/desactivar el bloqueo de horario sin tener que
+// tocar código: mientras se están haciendo pruebas conviene poder crear
+// pedidos a cualquier hora. Cuando esté todo listo para el lanzamiento,
+// alcanza con agregar HORARIO_ATENCION_ACTIVO=true en las variables de
+// entorno de Render (sin volver a tocar este archivo).
+function horarioDeAtencionActivo() {
+  return process.env.HORARIO_ATENCION_ACTIVO === 'true';
+}
+
 function calcularDetalleTarifa(distanciaKm) {
   const distancia = Number(distanciaKm);
 
@@ -169,7 +178,9 @@ router.post('/', async (req, res) => {
   try {
     // Se valida el horario ANTES que cualquier otra cosa: no tiene sentido
     // seguir calculando tarifas si de entrada no se va a aceptar el pedido.
-    if (!dentroDelHorarioDeServicio()) {
+    // Mientras HORARIO_ATENCION_ACTIVO no esté en "true" en Render, este
+    // bloqueo queda desactivado (para poder probar a cualquier hora).
+    if (horarioDeAtencionActivo() && !dentroDelHorarioDeServicio()) {
       return res.status(403).json({
         error: 'Fuera de horario de atención: el servicio funciona de 07:30 a 17:30 hs.'
       });
