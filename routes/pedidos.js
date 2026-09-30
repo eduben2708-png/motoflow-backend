@@ -488,4 +488,52 @@ router.post('/:id/mensajes', async (req, res) => {
   }
 });
 
+// PUT /api/pedidos/:id/calificacion
+// El cliente que hizo el pedido califica al repartidor de 1 a 5 estrellas
+// una vez entregado. Se guarda por pedido y además se recalcula el promedio
+// del repartidor (repartidores.calificacion), que ya se muestra en el panel
+// de admin y en el propio panel del repartidor.
+router.put('/:id/calificacion', async (req, res) => {
+  let conn;
+  try {
+    const { id } = req.params;
+    const calificacion = Number(req.body.calificacion);
+
+    if (!Number.isInteger(calificacion) || calificacion < 1 || calificacion > 5) {
+      return res.status(400).json({ error: 'La calificación debe ser un número entero de 1 a 5.' });
+    }
+
+    conn = await pool.getConnection();
+
+    const [[pedido]] = await conn.query('SELECT estado, repartidor_id, calificacion_repartidor FROM pedidos WHERE id = ?', [id]);
+    if (!pedido) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    if (pedido.estado !== 'entregado') {
+      return res.status(400).json({ error: 'Solo se puede calificar un pedido que ya fue entregado.' });
+    }
+    if (!pedido.repartidor_id) {
+      return res.status(400).json({ error: 'Este pedido no tiene un repartidor asignado.' });
+    }
+    if (pedido.calificacion_repartidor) {
+      return res.status(400).json({ error: 'Este pedido ya fue calificado.' });
+    }
+
+    await conn.query('UPDATE pedidos SET calificacion_repartidor = ? WHERE id = ?', [calificacion, id]);
+
+    // Promedio de todas las calificaciones que tiene ese repartidor hasta ahora.
+    const [[{ promedio }]] = await conn.query(
+      'SELECT AVG(calificacion_repartidor) AS promedio FROM pedidos WHERE repartidor_id = ? AND calificacion_repartidor IS NOT NULL',
+      [pedido.repartidor_id]
+    );
+    await conn.query('UPDATE repartidores SET calificacion = ? WHERE id = ?', [promedio, pedido.repartidor_id]);
+
+    res.json({ success: true, calificacion, promedioRepartidor: Number(promedio) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
 module.exports = router;

@@ -113,6 +113,7 @@ async function crearTablaPedidos() {
         recargo_centro DECIMAL(10, 2) DEFAULT 0,
         pago_servicio_retiro BOOLEAN DEFAULT FALSE,
         forma_pago_servicio VARCHAR(50) NULL,
+        calificacion_repartidor TINYINT NULL,
         FOREIGN KEY (liquidacion_id) REFERENCES liquidaciones(id)
       )
     `);
@@ -161,6 +162,16 @@ async function crearTablaPedidos() {
     try {
       await conn.query('ALTER TABLE pedidos ADD COLUMN forma_pago_servicio VARCHAR(50) NULL');
       console.log('✓ Columna "forma_pago_servicio" agregada a "pedidos"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
+    // Calificación (1 a 5) que el cliente le deja al repartidor una vez
+    // entregado el pedido. Con esto se recalcula el promedio guardado en
+    // repartidores.calificacion (ver PUT /api/pedidos/:id/calificacion).
+    try {
+      await conn.query('ALTER TABLE pedidos ADD COLUMN calificacion_repartidor TINYINT NULL');
+      console.log('✓ Columna "calificacion_repartidor" agregada a "pedidos"');
     } catch (error) {
       // Ya existe la columna: es esperable en cada reinicio a partir del primero.
     }
