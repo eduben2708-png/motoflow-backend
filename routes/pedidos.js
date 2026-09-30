@@ -99,6 +99,12 @@ function esRetiroEnElCentro(lat, lng) {
   return distanciaEntrePuntosKm(lat, lng, CENTRO_CDE.lat, CENTRO_CDE.lng) <= RADIO_CENTRO_KM;
 }
 
+// Comisión por armar una Compra por Encargo. Se deja en 0 mientras se está
+// captando clientela; toda la estructura (columna comision_encargo, fila en
+// el desglose, etc.) queda intacta para poder volver a cobrar un % más
+// adelante sin tener que tocar nada más que este número.
+const PORCENTAJE_COMISION_ENCARGO = 0;
+
 // GET /api/pedidos
 router.get('/', async (req, res) => {
   try {
@@ -191,8 +197,15 @@ router.post('/', async (req, res) => {
       origen_nombre, destino_nombre, // Se agregan nombres/referencias comerciales opcionales
       distancia_km, monto_compra,
       origen_lat, origen_lng, destino_lat, destino_lng,
-      telefono_destinatario
+      telefono_destinatario, pago_servicio_retiro
     } = req.body;
+
+    // El vendedor tilda esto cuando ya arregla el pago del servicio
+    // directo con el repartidor al momento del retiro (por ejemplo, en
+    // mano), y por lo tanto el repartidor NO debe cobrarle esa parte al
+    // destinatario cuando entrega. La forma de pago de ese cobro la carga
+    // el repartidor recién al marcar "Paquete retirado" (ver PUT /:id).
+    const pagoServicioRetiro = pago_servicio_retiro === true || pago_servicio_retiro === 'true';
 
     // Teléfono opcional de quien recibe el pedido (lo carga el vendedor a
     // partir del contacto que le pasó su propio cliente), para que el
@@ -218,7 +231,7 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'El monto de compra es obligatorio para un encargo' });
     }
 
-    const comisionEncargo = tipo === 'encargo' ? Math.round(montoCompra * 0.02) : 0;
+    const comisionEncargo = tipo === 'encargo' ? Math.round(montoCompra * PORCENTAJE_COMISION_ENCARGO) : 0;
     const recargoCentro = esRetiroEnElCentro(origenLat, origenLng) ? RECARGO_CENTRO : 0;
     const montoTotal = detalleTarifa.tarifaServicio + montoCompra + comisionEncargo + recargoCentro;
 
@@ -234,15 +247,15 @@ router.post('/', async (req, res) => {
         origen_lat, origen_lng, destino_lat, destino_lng, monto, tipo_pago,
         distancia_km, tarifa_base, km_adicionales, costo_km_adicionales,
         monto_compra, comision_encargo, tarifa_servicio, estado, telefono_destinatario,
-        recargo_centro
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        recargo_centro, pago_servicio_retiro
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         cliente_id, tipo, dirOrigenFinal, dirDestinoFinal,
         origenLat, origenLng, destinoLat, destinoLng, montoTotal, 'pendiente',
         detalleTarifa.distanciaKm, detalleTarifa.tarifaBase, detalleTarifa.kmAdicionales,
         detalleTarifa.costoKmAdicionales, montoCompra, comisionEncargo,
         detalleTarifa.tarifaServicio, 'pendiente', telefonoDestinatario,
-        recargoCentro
+        recargoCentro, pagoServicioRetiro
       ]
     );
 
@@ -316,6 +329,7 @@ router.post('/', async (req, res) => {
       montoCompra,
       comisionEncargo,
       recargoCentro,
+      pagoServicioRetiro,
       repartidor_id: repartidorAsignado?.id || null,
       distancia_repartidor_km: repartidorAsignado ? Number(repartidorAsignado.distanciaKm.toFixed(2)) : null
     });
@@ -332,7 +346,7 @@ router.put('/:id', async (req, res) => {
 
   try {
     const { id } = req.params;
-    const { estado, repartidor_id, tipo_pago } = req.body;
+    const { estado, repartidor_id, tipo_pago, forma_pago_servicio } = req.body;
 
     if (!['pendiente', 'asignado', 'en_retiro', 'en_camino', 'entregado', 'cancelado'].includes(estado)) {
       return res.status(400).json({ error: 'Estado de pedido inválido' });
@@ -344,28 +358,37 @@ router.put('/:id', async (req, res) => {
       return res.status(400).json({ error: 'Forma de pago inválida' });
     }
 
+    if (forma_pago_servicio !== undefined && forma_pago_servicio !== null && forma_pago_servicio !== '' &&
+        !['efectivo', 'transferencia', 'qr'].includes(forma_pago_servicio)) {
+      return res.status(400).json({ error: 'Forma de pago del servicio inválida' });
+    }
+
     const tieneRepartidor = repartidor_id !== undefined && repartidor_id !== null && repartidor_id !== '';
     const tienePago = tipo_pago !== undefined && tipo_pago !== null && tipo_pago !== '';
+    const tieneFormaPagoServicio = forma_pago_servicio !== undefined && forma_pago_servicio !== null && forma_pago_servicio !== '';
 
-    if (tieneRepartidor && tienePago) {
-      await conn.query(
-        'UPDATE pedidos SET estado = ?, repartidor_id = ?, tipo_pago = ? WHERE id = ?',
-        [estado, repartidor_id, tipo_pago, id]
-      );
-    } else if (tieneRepartidor) {
-      await conn.query(
-        'UPDATE pedidos SET estado = ?, repartidor_id = ? WHERE id = ?',
-        [estado, repartidor_id, id]
-      );
-    } else if (tienePago) {
-      await conn.query(
-        'UPDATE pedidos SET estado = ?, tipo_pago = ? WHERE id = ?',
-        [estado, tipo_pago, id]
-      );
-    } else {
-      await conn.query('UPDATE pedidos SET estado = ? WHERE id = ?', [estado, id]);
+    // Se arma el UPDATE con solo los campos que vinieron, en vez de un
+    // if/else por cada combinación posible (con 3 campos opcionales ya
+    // serían 8 casos): más fácil de leer y de sumarle un campo más adelante.
+    const camposActualizar = ['estado = ?'];
+    const valoresActualizar = [estado];
+
+    if (tieneRepartidor) {
+      camposActualizar.push('repartidor_id = ?');
+      valoresActualizar.push(repartidor_id);
     }
-    
+    if (tienePago) {
+      camposActualizar.push('tipo_pago = ?');
+      valoresActualizar.push(tipo_pago);
+    }
+    if (tieneFormaPagoServicio) {
+      camposActualizar.push('forma_pago_servicio = ?');
+      valoresActualizar.push(forma_pago_servicio);
+    }
+
+    valoresActualizar.push(id);
+    await conn.query(`UPDATE pedidos SET ${camposActualizar.join(', ')} WHERE id = ?`, valoresActualizar);
+
     if (repartidor_id && estado === 'asignado') {
       console.log(`🔔 NOTIFICACIÓN: Pedido #${id} asignado a repartidor ${repartidor_id}`);
 

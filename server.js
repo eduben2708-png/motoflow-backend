@@ -111,6 +111,8 @@ async function crearTablaPedidos() {
         liquidacion_id INT NULL,
         telefono_destinatario VARCHAR(20) NULL,
         recargo_centro DECIMAL(10, 2) DEFAULT 0,
+        pago_servicio_retiro BOOLEAN DEFAULT FALSE,
+        forma_pago_servicio VARCHAR(50) NULL,
         FOREIGN KEY (liquidacion_id) REFERENCES liquidaciones(id)
       )
     `);
@@ -140,6 +142,25 @@ async function crearTablaPedidos() {
     try {
       await conn.query('ALTER TABLE pedidos ADD COLUMN recargo_centro DECIMAL(10, 2) DEFAULT 0');
       console.log('✓ Columna "recargo_centro" agregada a "pedidos"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
+    // Caso "el vendedor ya arregla el pago del servicio directo con el
+    // repartidor al momento de retirar" (por ejemplo, en mano), y por eso no
+    // corresponde cobrárselo al destinatario al entregar. pago_servicio_retiro
+    // lo tilda el vendedor al confirmar el pedido; forma_pago_servicio la
+    // completa el repartidor recién al marcar "Paquete retirado".
+    try {
+      await conn.query('ALTER TABLE pedidos ADD COLUMN pago_servicio_retiro BOOLEAN DEFAULT FALSE');
+      console.log('✓ Columna "pago_servicio_retiro" agregada a "pedidos"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
+    try {
+      await conn.query('ALTER TABLE pedidos ADD COLUMN forma_pago_servicio VARCHAR(50) NULL');
+      console.log('✓ Columna "forma_pago_servicio" agregada a "pedidos"');
     } catch (error) {
       // Ya existe la columna: es esperable en cada reinicio a partir del primero.
     }
