@@ -248,6 +248,19 @@ async function crearTablaLiquidaciones() {
       )
     `);
     console.log('✓ Tabla liquidaciones verificada');
+
+    // Guarda cómo se cobró la tarifa de esos pedidos (efectivo, transferencia,
+    // QR, app) como JSON de texto, para mostrarlo en el detalle de la
+    // liquidación sin tener que recalcularlo cada vez. No cambia en nada el
+    // cálculo de a quién le debe plata a quién (ver calcularResumen en
+    // routes/liquidaciones.js), es solo informativo.
+    try {
+      await conn.query('ALTER TABLE liquidaciones ADD COLUMN tarifas_por_metodo TEXT NULL');
+      console.log('✓ Columna "tarifas_por_metodo" agregada a "liquidaciones"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
     conn.release();
   } catch (error) {
     console.error('❌ Error en tabla liquidaciones:', error.message);

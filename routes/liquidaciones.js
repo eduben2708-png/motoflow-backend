@@ -4,12 +4,27 @@ const pool = require('../config/database');
 
 const PORCENTAJE_REPARTIDOR = 0.80;
 
+// Formas de pago válidas para la tarifa de servicio (las mismas que usa el
+// panel financiero del administrador). Cualquier otro valor (o vacío) cae en
+// "sin_definir" en vez de romper la cuenta.
+const METODOS_PAGO_VALIDOS = ['efectivo', 'transferencia', 'qr', 'app'];
+
+// La tarifa de servicio la puede cobrar el repartidor al vendedor (al
+// retirar, si tildó esa opción al crear el pedido) o al destinatario (al
+// entregar) — hay que mirar el campo correcto en cada caso, igual que en
+// GET /api/pedidos/financiero.
+function resolverMetodoPagoTarifa(pedido) {
+  const metodo = pedido.pago_servicio_retiro ? pedido.forma_pago_servicio : pedido.tipo_pago;
+  return METODOS_PAGO_VALIDOS.includes(metodo) ? metodo : 'sin_definir';
+}
+
 async function calcularResumen(conn, repartidorId, fechaDesde, fechaHasta) {
   const desdeValida = fechaDesde || '2000-01-01 00:00:00';
   const hastaValida = fechaHasta || new Date().toISOString().slice(0, 19).replace('T', ' ');
 
   const [pedidos] = await conn.query(
-    `SELECT id, tarifa_servicio, monto_compra, comision_encargo, tipo_pago, fecha_creacion
+    `SELECT id, tarifa_servicio, monto_compra, comision_encargo, tipo_pago,
+            pago_servicio_retiro, forma_pago_servicio, fecha_creacion
      FROM pedidos
      WHERE repartidor_id = ?
        AND estado = 'entregado'
@@ -21,6 +36,16 @@ async function calcularResumen(conn, repartidorId, fechaDesde, fechaHasta) {
   );
 
   const totalTarifas = pedidos.reduce((total, pedido) => total + Number(pedido.tarifa_servicio || 0), 0);
+
+  // Solo para mostrar cómo se cobró cada parte de la tarifa — no cambia en
+  // nada el cálculo de abajo (80/20, efectivo a rendir, quién le debe a
+  // quién), que sigue basándose únicamente en tipo_pago === 'efectivo' como
+  // siempre.
+  const tarifasPorMetodo = { efectivo: 0, transferencia: 0, qr: 0, app: 0, sin_definir: 0 };
+  pedidos.forEach(pedido => {
+    const metodo = resolverMetodoPagoTarifa(pedido);
+    tarifasPorMetodo[metodo] += Number(pedido.tarifa_servicio || 0);
+  });
   const montoRepartidor = Math.round(totalTarifas * PORCENTAJE_REPARTIDOR);
   const comisionPlataforma = totalTarifas - montoRepartidor;
 
@@ -55,6 +80,7 @@ async function calcularResumen(conn, repartidorId, fechaDesde, fechaHasta) {
     porcentaje_repartidor: 80,
     total_servicios: pedidos.length,
     total_tarifas: totalTarifas,
+    tarifas_por_metodo: tarifasPorMetodo,
     monto_repartidor: montoRepartidor,
     comision_plataforma: comisionPlataforma,
     efectivo_cobrado: efectivoCobrado,
@@ -65,6 +91,7 @@ async function calcularResumen(conn, repartidorId, fechaDesde, fechaHasta) {
       id: pedido.id,
       tarifa_servicio: Number(pedido.tarifa_servicio || 0),
       tipo_pago: pedido.tipo_pago,
+      metodo_pago_tarifa: resolverMetodoPagoTarifa(pedido),
       fecha_creacion: pedido.fecha_creacion
     }))
   };
@@ -110,15 +137,16 @@ router.post('/cerrar-semana', async (req, res) => {
       const [resultado] = await conn.query(
         `INSERT INTO liquidaciones (
           repartidor_id, fecha_inicio, fecha_fin, total_servicios,
-          total_tarifas, monto_repartidor, comision_plataforma,
+          total_tarifas, tarifas_por_metodo, monto_repartidor, comision_plataforma,
           efectivo_cobrado, monto_neto, direccion_pago, estado
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendiente')`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendiente')`,
         [
           resumen.repartidor_id,
           resumen.fecha_inicio,
           resumen.fecha_fin,
           resumen.total_servicios,
           resumen.total_tarifas,
+          JSON.stringify(resumen.tarifas_por_metodo),
           resumen.monto_repartidor,
           resumen.comision_plataforma,
           resumen.efectivo_cobrado,
@@ -167,7 +195,18 @@ router.get('/', async (req, res) => {
        ORDER BY l.fecha_fin DESC, l.id DESC`,
       valores
     );
-    res.json(liquidaciones);
+
+    // tarifas_por_metodo se guarda como texto (JSON) en la base; se manda
+    // como objeto para que el frontend no tenga que parsearlo. Las
+    // liquidaciones creadas antes de este campo existir quedan en null.
+    const conTarifasParseadas = liquidaciones.map(liquidacion => ({
+      ...liquidacion,
+      tarifas_por_metodo: liquidacion.tarifas_por_metodo
+        ? JSON.parse(liquidacion.tarifas_por_metodo)
+        : null
+    }));
+
+    res.json(conTarifasParseadas);
   } catch (error) {
     res.status(500).json({ error: error.message });
   } finally {
@@ -192,15 +231,16 @@ router.post('/', async (req, res) => {
     const [resultado] = await conn.query(
       `INSERT INTO liquidaciones (
         repartidor_id, fecha_inicio, fecha_fin, total_servicios,
-        total_tarifas, monto_repartidor, comision_plataforma,
+        total_tarifas, tarifas_por_metodo, monto_repartidor, comision_plataforma,
         efectivo_cobrado, monto_neto, direccion_pago, estado
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendiente')`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendiente')`,
       [
         resumen.repartidor_id,
         resumen.fecha_inicio,
         resumen.fecha_fin,
         resumen.total_servicios,
         resumen.total_tarifas,
+        JSON.stringify(resumen.tarifas_por_metodo),
         resumen.monto_repartidor,
         resumen.comision_plataforma,
         resumen.efectivo_cobrado,
