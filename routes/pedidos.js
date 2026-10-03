@@ -177,6 +177,77 @@ router.get('/historial', async (req, res) => {
   }
 });
 
+// GET /api/pedidos/financiero - Cuánto cobró realmente JMMotocourier (su
+// propia tarifa de servicio, NO el monto_compra que es plata de paso del
+// vendedor), agrupado por forma de pago, más el historial de pedidos que
+// componen cada total. Solo cuenta pedidos "entregado": es plata que ya se
+// cobró de verdad, no la que todavía está en camino.
+router.get('/financiero', async (req, res) => {
+  let conn;
+  try {
+    const { fecha_desde, fecha_hasta } = req.query;
+
+    const condiciones = ["p.estado = 'entregado'"];
+    const valores = [];
+
+    if (fecha_desde) {
+      condiciones.push('p.fecha_creacion >= ?');
+      valores.push(`${fecha_desde} 00:00:00`);
+    }
+    if (fecha_hasta) {
+      condiciones.push('p.fecha_creacion <= ?');
+      valores.push(`${fecha_hasta} 23:59:59`);
+    }
+
+    conn = await pool.getConnection();
+    const [pedidos] = await conn.query(
+      `SELECT p.id, p.fecha_creacion, p.tipo, p.tarifa_servicio, p.recargo_centro, p.comision_encargo,
+              p.pago_servicio_retiro, p.tipo_pago, p.forma_pago_servicio, p.repartidor_id,
+              uc.nombre AS cliente_nombre
+       FROM pedidos p
+       LEFT JOIN usuarios uc ON p.cliente_id = uc.id
+       WHERE ${condiciones.join(' AND ')}
+       ORDER BY p.fecha_creacion DESC`,
+      valores
+    );
+
+    const METODOS_VALIDOS = ['efectivo', 'transferencia', 'qr', 'app'];
+    const totalesPorMetodo = { efectivo: 0, transferencia: 0, qr: 0, app: 0, sin_definir: 0 };
+
+    const historial = pedidos.map(pedido => {
+      const montoServicio = Number(pedido.tarifa_servicio || 0)
+        + Number(pedido.recargo_centro || 0)
+        + Number(pedido.comision_encargo || 0);
+
+      // La tarifa de JMMotocourier la cobra el repartidor al vendedor (al
+      // retirar, si tildó esa opción) o al destinatario (al entregar). Hay
+      // que fijarse en el campo correcto según cuál de los dos pasó.
+      let metodoPago = pedido.pago_servicio_retiro ? pedido.forma_pago_servicio : pedido.tipo_pago;
+      if (!METODOS_VALIDOS.includes(metodoPago)) metodoPago = 'sin_definir';
+
+      totalesPorMetodo[metodoPago] += montoServicio;
+
+      return {
+        id: pedido.id,
+        fecha_creacion: pedido.fecha_creacion,
+        tipo: pedido.tipo,
+        monto_servicio: montoServicio,
+        metodo_pago: metodoPago,
+        cliente_nombre: pedido.cliente_nombre,
+        repartidor_id: pedido.repartidor_id
+      };
+    });
+
+    const totalGeneral = Object.values(totalesPorMetodo).reduce((suma, valor) => suma + valor, 0);
+
+    res.json({ totalGeneral, totalesPorMetodo, historial });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
 // POST /api/pedidos
 router.post('/', async (req, res) => {
   let conn;
