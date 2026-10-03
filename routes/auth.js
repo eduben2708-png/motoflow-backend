@@ -296,6 +296,45 @@ router.put('/completar-registro', async (req, res) => {
   }
 });
 
+// PUT /api/auth/cambiar-password - El propio usuario (cliente o repartidor)
+// cambia su contraseña desde su cuenta. Si todavía no tenía una (típico de
+// un repartidor que siempre entró con el código SMS), no se le pide la
+// actual: se le deja crear la primera directamente.
+router.put('/cambiar-password', async (req, res) => {
+  let conn;
+  try {
+    const { usuario_id, password_actual, password_nueva } = req.body;
+
+    if (!usuario_id) {
+      return res.status(400).json({ error: 'Falta el usuario' });
+    }
+    if (!password_nueva || String(password_nueva).length < 6) {
+      return res.status(400).json({ error: 'La contraseña nueva debe tener al menos 6 caracteres' });
+    }
+
+    conn = await pool.getConnection();
+    const [[usuario]] = await conn.query('SELECT id, password_hash FROM usuarios WHERE id = ?', [usuario_id]);
+    if (!usuario) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+
+    if (usuario.password_hash) {
+      if (!password_actual || !verificarPassword(String(password_actual), usuario.password_hash)) {
+        return res.status(401).json({ error: 'La contraseña actual no es correcta' });
+      }
+    }
+
+    await conn.query('UPDATE usuarios SET password_hash = ? WHERE id = ?', [hashPassword(String(password_nueva)), usuario_id]);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Error al cambiar contraseña:', error.message);
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
 // GET /api/auth/estadisticas-registro - Cuántas cuentas de cada tipo hay
 // registradas en total, para el panel del administrador.
 router.get('/estadisticas-registro', async (req, res) => {

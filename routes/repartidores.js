@@ -23,15 +23,10 @@ router.get('/', async (req, res) => {
   let conn;
   try {
     conn = await pool.getConnection();
-    // Nunca se selecciona "descriptor_facial" acá: este endpoint lo consulta
-    // cualquier cuenta logueada (no solo el admin), y ese campo es el código
-    // biométrico de la cara del repartidor. Solo se expone si está
-    // configurado o no (tiene_verificacion_facial), nunca el valor en sí.
     const [repartidores] = await conn.query(
       `SELECT r.id, r.usuario_id, r.ci, r.placa, r.marca_moto, r.modelo_moto, r.estado_aprobacion,
               r.ubicacion_lat, r.ubicacion_lng, r.gps_activo, r.alias_bancario, r.banco,
               r.titular_cuenta, r.ci_titular, r.total_entregas, r.calificacion, r.created_at,
-              (r.descriptor_facial IS NOT NULL) AS tiene_verificacion_facial,
               u.nombre, u.telefono
        FROM repartidores r
        JOIN usuarios u ON r.usuario_id = u.id
@@ -208,95 +203,6 @@ router.put('/:id/gps', async (req, res) => {
     res.json({ success: true, message: 'GPS actualizado' });
   } catch (error) {
     res.status(500).json({ error: error.message });
-  }
-});
-
-// Umbral de distancia entre dos "códigos" de cara (descriptors de 128
-// números que genera face-api.js en el navegador) para considerarlos la
-// misma persona. Es el valor que recomienda la propia librería.
-const UMBRAL_DISTANCIA_ROSTRO = 0.6;
-
-function descriptorValido(descriptor) {
-  return Array.isArray(descriptor) && descriptor.length === 128 && descriptor.every(valor => Number.isFinite(valor));
-}
-
-function distanciaEntreDescriptores(a, b) {
-  let sumaCuadrados = 0;
-  for (let i = 0; i < a.length; i++) {
-    const diferencia = a[i] - b[i];
-    sumaCuadrados += diferencia * diferencia;
-  }
-  return Math.sqrt(sumaCuadrados);
-}
-
-// POST /:id/rostro - El repartidor registra su cara una sola vez (con su
-// consentimiento, tildado en el frontend antes de abrir la cámara). Se
-// guarda el descriptor (el "código" de 128 números), nunca la foto.
-router.post('/:id/rostro', async (req, res) => {
-  let conn;
-  try {
-    const { id } = req.params;
-    const { descriptor } = req.body;
-
-    if (!descriptorValido(descriptor)) {
-      return res.status(400).json({ error: 'La verificación facial no se generó correctamente. Probá de nuevo con buena luz, mirando de frente.' });
-    }
-
-    conn = await pool.getConnection();
-    const [[repartidor]] = await conn.query('SELECT id FROM repartidores WHERE id = ?', [id]);
-    if (!repartidor) {
-      return res.status(404).json({ error: 'Repartidor no encontrado' });
-    }
-
-    await conn.query(
-      'UPDATE repartidores SET descriptor_facial = ?, consentimiento_biometrico = TRUE, consentimiento_biometrico_fecha = NOW() WHERE id = ?',
-      [JSON.stringify(descriptor), id]
-    );
-
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  } finally {
-    if (conn) conn.release();
-  }
-});
-
-// POST /:id/verificar-rostro - Se llama cada vez que el repartidor activa el
-// GPS/arranca su turno: compara la selfie de ese momento (ya convertida a
-// descriptor en el navegador) contra el descriptor guardado al registrarse.
-// Nunca se guarda ni se devuelve la selfie ni el descriptor guardado: solo
-// si coincidió o no.
-router.post('/:id/verificar-rostro', async (req, res) => {
-  let conn;
-  try {
-    const { id } = req.params;
-    const { descriptor } = req.body;
-
-    if (!descriptorValido(descriptor)) {
-      return res.status(400).json({ error: 'La verificación facial no se generó correctamente. Probá de nuevo con buena luz, mirando de frente.' });
-    }
-
-    conn = await pool.getConnection();
-    const [[repartidor]] = await conn.query('SELECT descriptor_facial FROM repartidores WHERE id = ?', [id]);
-    if (!repartidor) {
-      return res.status(404).json({ error: 'Repartidor no encontrado' });
-    }
-    if (!repartidor.descriptor_facial) {
-      return res.status(400).json({ error: 'Todavía no configuraste tu verificación facial.' });
-    }
-
-    const descriptorGuardado = JSON.parse(repartidor.descriptor_facial);
-    const verificado = distanciaEntreDescriptores(descriptor, descriptorGuardado) < UMBRAL_DISTANCIA_ROSTRO;
-
-    if (verificado) {
-      await conn.query('UPDATE repartidores SET ultima_verificacion_facial = NOW() WHERE id = ?', [id]);
-    }
-
-    res.json({ verificado });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  } finally {
-    if (conn) conn.release();
   }
 });
 
