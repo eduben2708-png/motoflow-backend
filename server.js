@@ -68,9 +68,48 @@ async function inicializarTablasDB() {
         total_entregas INT DEFAULT 0,
         calificacion DECIMAL(3, 2) DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        descriptor_facial TEXT NULL,
+        consentimiento_biometrico BOOLEAN DEFAULT FALSE,
+        consentimiento_biometrico_fecha TIMESTAMP NULL,
+        ultima_verificacion_facial TIMESTAMP NULL,
         FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
       )
     `);
+
+    // Verificación facial al activar el GPS: evita que otra persona use la
+    // cuenta de un repartidor aprobado. descriptor_facial guarda el "código"
+    // numérico de su cara (no la foto), generado una sola vez al registrarla
+    // con su consentimiento explícito; cada selfie posterior se compara
+    // contra ese código en el momento, sin guardarse (ver
+    // POST /:id/rostro y POST /:id/verificar-rostro en routes/repartidores.js).
+    try {
+      await conn.query('ALTER TABLE repartidores ADD COLUMN descriptor_facial TEXT NULL');
+      console.log('✓ Columna "descriptor_facial" agregada a "repartidores"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
+    try {
+      await conn.query('ALTER TABLE repartidores ADD COLUMN consentimiento_biometrico BOOLEAN DEFAULT FALSE');
+      console.log('✓ Columna "consentimiento_biometrico" agregada a "repartidores"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
+    try {
+      await conn.query('ALTER TABLE repartidores ADD COLUMN consentimiento_biometrico_fecha TIMESTAMP NULL');
+      console.log('✓ Columna "consentimiento_biometrico_fecha" agregada a "repartidores"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
+    try {
+      await conn.query('ALTER TABLE repartidores ADD COLUMN ultima_verificacion_facial TIMESTAMP NULL');
+      console.log('✓ Columna "ultima_verificacion_facial" agregada a "repartidores"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
     console.log('✓ Tabla repartidores verificada');
     conn.release();
   } catch (error) {
