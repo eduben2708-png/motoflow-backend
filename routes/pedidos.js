@@ -468,6 +468,29 @@ router.put('/:id', async (req, res) => {
     // Se arma el UPDATE con solo los campos que vinieron, en vez de un
     // if/else por cada combinación posible (con 3 campos opcionales ya
     // serían 8 casos): más fácil de leer y de sumarle un campo más adelante.
+    // Un pedido solo se le puede asignar a un repartidor que esté aprobado y
+    // con el GPS activo (igual que la asignación automática). Si el pedido ya
+    // tenía a ese mismo repartidor, se deja guardar el cambio de estado.
+    if (tieneRepartidor) {
+      const [[pedidoActual]] = await conn.query('SELECT repartidor_id FROM pedidos WHERE id = ?', [id]);
+      if (!pedidoActual) {
+        return res.status(404).json({ error: 'Pedido no encontrado' });
+      }
+
+      if (Number(pedidoActual.repartidor_id) !== Number(repartidor_id)) {
+        const [[destino]] = await conn.query(
+          'SELECT estado_aprobacion, gps_activo FROM repartidores WHERE id = ?',
+          [repartidor_id]
+        );
+        if (!destino || destino.estado_aprobacion !== 'aprobado') {
+          return res.status(400).json({ error: 'Ese repartidor no existe o no está aprobado.' });
+        }
+        if (!destino.gps_activo) {
+          return res.status(400).json({ error: 'No se puede asignar: ese repartidor no tiene el GPS activo.' });
+        }
+      }
+    }
+
     const camposActualizar = ['estado = ?'];
     const valoresActualizar = [estado];
 
