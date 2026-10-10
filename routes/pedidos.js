@@ -556,7 +556,13 @@ router.post('/:id/mensajes', async (req, res) => {
     // cliente y repartidor sigan escribiéndose. Este chequeo es la barrera
     // real: el botón de chat se oculta en el frontend, pero esto evita que
     // alguien mande el mensaje pegándole directo a la API.
-    const [[pedido]] = await conn.query('SELECT estado FROM pedidos WHERE id = ?', [id]);
+    const [[pedido]] = await conn.query(
+      `SELECT p.estado, p.cliente_id, r.usuario_id AS repartidor_usuario_id
+       FROM pedidos p
+       LEFT JOIN repartidores r ON p.repartidor_id = r.id
+       WHERE p.id = ?`,
+      [id]
+    );
     if (!pedido) {
       return res.status(404).json({ error: 'Pedido no encontrado' });
     }
@@ -571,6 +577,22 @@ router.post('/:id/mensajes', async (req, res) => {
     const [[usuario]] = await conn.query('SELECT nombre FROM usuarios WHERE id = ?', [usuario_id]);
 
     console.log(`💬 Mensaje en pedido #${id}: ${texto}`);
+
+    // Aviso push al otro lado de la conversación: si escribe el cliente, le
+    // llega al repartidor; si escribe el repartidor (o el administrador), le
+    // llega al cliente. Así se enteran aunque tengan la app cerrada o el
+    // celular bloqueado. No se espera la respuesta para no demorar el envío.
+    const destinatarioId = Number(usuario_id) === Number(pedido.cliente_id)
+      ? pedido.repartidor_usuario_id
+      : pedido.cliente_id;
+    if (destinatarioId && Number(destinatarioId) !== Number(usuario_id)) {
+      enviarPushAUsuario(destinatarioId, {
+        tipo: 'mensaje',
+        titulo: `💬 ${usuario?.nombre || 'Nuevo mensaje'}`,
+        cuerpo: texto.length > 120 ? `${texto.slice(0, 117)}...` : texto,
+        pedidoId: Number(id)
+      }).catch(error => console.error('Error al enviar push de mensaje:', error.message));
+    }
 
     res.json({
       id: resultado.insertId,
