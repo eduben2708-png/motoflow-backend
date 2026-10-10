@@ -3,6 +3,26 @@ const router = express.Router();
 const pool = require('../config/database');
 const { idsRepartidoresBloqueados } = require('../utils/bloqueo');
 
+// La foto llega desde la app ya reducida (cuadrada, ~400 px, JPEG). Acá se
+// valida que realmente sea una imagen en formato data URL y que no sea
+// enorme, para no llenar la base con archivos que no corresponden.
+const TAMANO_MAXIMO_FOTO = 600 * 1024;
+function validarFoto(foto) {
+  if (foto === undefined || foto === null || foto === '') return { ok: true, valor: null };
+  if (typeof foto !== 'string' || !/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(foto)) {
+    return { ok: false, error: 'La foto no es una imagen válida' };
+  }
+  if (foto.length > TAMANO_MAXIMO_FOTO) {
+    return { ok: false, error: 'La foto es demasiado grande. Probá con otra o sacala de nuevo.' };
+  }
+  return { ok: true, valor: foto };
+}
+
+function normalizarColor(color) {
+  const limpio = String(color || '').trim().slice(0, 30);
+  return limpio ? limpio.charAt(0).toUpperCase() + limpio.slice(1).toLowerCase() : null;
+}
+
 function normalizarTelefono(telefono) {
   let numero = String(telefono || '').replace(/\D/g, '');
   if (numero.startsWith('595')) numero = numero.slice(3);
@@ -28,6 +48,8 @@ router.get('/', async (req, res) => {
               r.ubicacion_lat, r.ubicacion_lng, r.gps_activo, r.alias_bancario, r.banco,
               r.titular_cuenta, r.ci_titular, r.total_entregas, r.calificacion, r.created_at,
               TIMESTAMPDIFF(SECOND, r.ubicacion_actualizada, NOW()) AS segundos_desde_ubicacion,
+              r.color_moto, (r.foto_perfil IS NOT NULL) AS tiene_foto,
+              UNIX_TIMESTAMP(r.foto_actualizada) AS foto_version,
               u.nombre, u.telefono
        FROM repartidores r
        JOIN usuarios u ON r.usuario_id = u.id
@@ -51,14 +73,48 @@ router.get('/', async (req, res) => {
   }
 });
 
+// GET /:id/foto - Entrega la foto del repartidor como imagen, para usarla en
+// un <img>. Se pide aparte (y no dentro de la lista de repartidores) porque
+// la lista se consulta cada pocos segundos y la foto pesa decenas de KB.
+router.get('/:id/foto', async (req, res) => {
+  let conn;
+  try {
+    conn = await pool.getConnection();
+    const [[fila]] = await conn.query('SELECT foto_perfil FROM repartidores WHERE id = ?', [req.params.id]);
+    const coincidencia = fila && fila.foto_perfil ? /^data:(image\/[a-z]+);base64,(.+)$/.exec(fila.foto_perfil) : null;
+    if (!coincidencia) return res.status(404).end();
+
+    res.set('Content-Type', coincidencia[1]);
+    // La dirección lleva "?v=" con la fecha de la foto, así que se puede
+    // guardar en caché sin riesgo de mostrar una foto vieja tras cambiarla.
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.send(Buffer.from(coincidencia[2], 'base64'));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
 router.post('/registro', async (req, res) => {
   let conn;
   try {
     const { nombre, ci, placa, marca_moto, modelo_moto } = req.body;
     const telefono = normalizarTelefono(req.body.telefono);
+    const colorMoto = normalizarColor(req.body.color_moto);
+    const foto = validarFoto(req.body.foto);
 
     if (!nombre || !telefono || !ci || !placa) {
       return res.status(400).json({ error: 'Nombre, teléfono de 9 dígitos, CI y placa son obligatorios' });
+    }
+    if (!colorMoto) {
+      return res.status(400).json({ error: 'El color de la moto es obligatorio' });
+    }
+    if (!foto.ok) {
+      return res.status(400).json({ error: foto.error });
+    }
+    if (!foto.valor) {
+      return res.status(400).json({ error: 'La foto del repartidor es obligatoria' });
     }
 
     conn = await pool.getConnection();
@@ -106,9 +162,9 @@ router.post('/registro', async (req, res) => {
 
     const [repartidor] = await conn.query(
       `INSERT INTO repartidores (
-        usuario_id, ci, placa, marca_moto, modelo_moto, estado_aprobacion
-      ) VALUES (?, ?, ?, ?, ?, 'pendiente')`,
-      [usuarioId, ci, placa.toUpperCase(), marca_moto || null, modelo_moto || null]
+        usuario_id, ci, placa, marca_moto, modelo_moto, color_moto, foto_perfil, foto_actualizada, estado_aprobacion
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), 'pendiente')`,
+      [usuarioId, ci, placa.toUpperCase(), marca_moto || null, modelo_moto || null, colorMoto, foto.valor]
     );
 
     await conn.commit();
@@ -145,9 +201,14 @@ router.put('/:id', async (req, res) => {
     const { id } = req.params;
     const { nombre, ci, placa, marca_moto, modelo_moto } = req.body;
     const telefono = normalizarTelefono(req.body.telefono);
+    const colorMoto = normalizarColor(req.body.color_moto);
+    const foto = validarFoto(req.body.foto);
 
     if (!nombre || !telefono || !ci || !placa) {
       return res.status(400).json({ error: 'Nombre, teléfono de 9 dígitos, CI y placa son obligatorios' });
+    }
+    if (!foto.ok) {
+      return res.status(400).json({ error: foto.error });
     }
 
     conn = await pool.getConnection();
@@ -177,9 +238,13 @@ router.put('/:id', async (req, res) => {
 
     await conn.query('UPDATE usuarios SET nombre = ?, telefono = ? WHERE id = ?', [nombre, telefono, repartidor.usuario_id]);
     await conn.query(
-      'UPDATE repartidores SET ci = ?, placa = ?, marca_moto = ?, modelo_moto = ? WHERE id = ?',
-      [ci, placa.toUpperCase(), marca_moto || null, modelo_moto || null, id]
+      'UPDATE repartidores SET ci = ?, placa = ?, marca_moto = ?, modelo_moto = ?, color_moto = ? WHERE id = ?',
+      [ci, placa.toUpperCase(), marca_moto || null, modelo_moto || null, colorMoto, id]
     );
+    // La foto solo se cambia si se mandó una nueva; si no, se conserva la actual.
+    if (foto.valor) {
+      await conn.query('UPDATE repartidores SET foto_perfil = ?, foto_actualizada = NOW() WHERE id = ?', [foto.valor, id]);
+    }
 
     await conn.commit();
     res.json({ success: true });

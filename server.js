@@ -122,6 +122,24 @@ async function inicializarTablasDB() {
       // Ya existe la columna: es esperable en cada reinicio a partir del primero.
     }
 
+    // Color de la moto y foto de perfil del repartidor: se muestran al cliente
+    // cuando sigue su pedido, para que reconozca a quién va a recibir. La
+    // foto se guarda ya reducida (unos 40-60 KB) como texto en la base, y no
+    // viaja en la lista de repartidores: se pide aparte en GET /:id/foto.
+    const columnasNuevas = [
+      ['color_moto', 'VARCHAR(30) NULL'],
+      ['foto_perfil', 'MEDIUMTEXT NULL'],
+      ['foto_actualizada', 'TIMESTAMP NULL']
+    ];
+    for (const [nombre, tipo] of columnasNuevas) {
+      try {
+        await conn.query(`ALTER TABLE repartidores ADD COLUMN ${nombre} ${tipo}`);
+        console.log(`✓ Columna "${nombre}" agregada a "repartidores"`);
+      } catch (error) {
+        // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+      }
+    }
+
     console.log('✓ Tabla repartidores verificada');
     conn.release();
   } catch (error) {
