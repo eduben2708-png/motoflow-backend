@@ -27,6 +27,7 @@ router.get('/', async (req, res) => {
       `SELECT r.id, r.usuario_id, r.ci, r.placa, r.marca_moto, r.modelo_moto, r.estado_aprobacion,
               r.ubicacion_lat, r.ubicacion_lng, r.gps_activo, r.alias_bancario, r.banco,
               r.titular_cuenta, r.ci_titular, r.total_entregas, r.calificacion, r.created_at,
+              TIMESTAMPDIFF(SECOND, r.ubicacion_actualizada, NOW()) AS segundos_desde_ubicacion,
               u.nombre, u.telefono
        FROM repartidores r
        JOIN usuarios u ON r.usuario_id = u.id
@@ -196,7 +197,7 @@ router.put('/:id/gps', async (req, res) => {
     const { lat, lng, activo } = req.body;
     const conn = await pool.getConnection();
     await conn.query(
-      'UPDATE repartidores SET ubicacion_lat = ?, ubicacion_lng = ?, gps_activo = ? WHERE id = ?',
+      'UPDATE repartidores SET ubicacion_lat = ?, ubicacion_lng = ?, gps_activo = ?, ubicacion_actualizada = NOW() WHERE id = ?',
       [lat, lng, activo, id]
     );
     conn.release();

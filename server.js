@@ -110,6 +110,18 @@ async function inicializarTablasDB() {
       // Ya existe la columna: es esperable en cada reinicio a partir del primero.
     }
 
+    // Cuándo llegó la última posición GPS del repartidor. Sin esto no hay
+    // forma de distinguir un repartidor que se está moviendo ahora de uno
+    // que cerró la app hace horas y quedó con "gps_activo" prendido: el mapa
+    // del cliente y el del administrador mostrarían una posición vieja como
+    // si fuera actual.
+    try {
+      await conn.query('ALTER TABLE repartidores ADD COLUMN ubicacion_actualizada TIMESTAMP NULL');
+      console.log('✓ Columna "ubicacion_actualizada" agregada a "repartidores"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
     console.log('✓ Tabla repartidores verificada');
     conn.release();
   } catch (error) {
