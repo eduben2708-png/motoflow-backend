@@ -67,6 +67,13 @@ function calcularDetalleTarifa(distanciaKm) {
   };
 }
 
+// Distancia máxima (en km, por calle) entre el retiro y la entrega que se
+// acepta. Más allá de esto queda fuera de la zona de servicio y el pedido se
+// rechaza. El mismo número está en el frontend (DISTANCIA_MAXIMA_PEDIDO_KM)
+// para avisarle al cliente antes de confirmar, pero el control de verdad es
+// este: el frontend lo puede saltear.
+const DISTANCIA_MAXIMA_PEDIDO_KM = 20;
+
 // Radio máximo (en km) desde la ubicación del repartidor hasta el punto de
 // retiro para que un pedido nuevo se le asigne automáticamente. Si no hay
 // ningún repartidor aprobado, con GPS activo y sin bloqueo dentro de este
@@ -296,6 +303,26 @@ router.post('/', async (req, res) => {
 
     if (![origenLat, origenLng, destinoLat, destinoLng].every(Number.isFinite)) {
       return res.status(400).json({ error: 'Marcá el punto de retiro y el punto de entrega en el mapa' });
+    }
+
+    // Zona de servicio: se controla la distancia que informó el cliente y
+    // también la distancia en línea recta entre los dos puntos (que sale de
+    // las coordenadas y no se puede falsear sin cambiar el destino). La
+    // distancia por calle nunca es menor que la recta, así que si la recta ya
+    // pasa el máximo, el pedido está fuera de zona sí o sí.
+    const distanciaRectaKm = distanciaEntrePuntosKm(origenLat, origenLng, destinoLat, destinoLng);
+    if (detalleTarifa.distanciaKm > DISTANCIA_MAXIMA_PEDIDO_KM || distanciaRectaKm > DISTANCIA_MAXIMA_PEDIDO_KM) {
+      return res.status(400).json({
+        error: `Ese destino queda fuera de nuestra zona de servicio: el máximo es de ${DISTANCIA_MAXIMA_PEDIDO_KM} km entre el retiro y la entrega.`
+      });
+    }
+    // Si dicen una distancia mucho menor que la real entre los puntos
+    // marcados (para pagar menos tarifa), no coincide: se rechaza. La
+    // distancia que manda la app va redondeada al km, de ahí el margen.
+    if (detalleTarifa.distanciaKm < distanciaRectaKm * 0.9 - 1) {
+      return res.status(400).json({
+        error: 'La distancia no coincide con los puntos marcados en el mapa. Volvé a marcar el retiro y la entrega.'
+      });
     }
 
     if (tipo === 'encargo' && montoCompra <= 0) {
