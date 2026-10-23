@@ -255,6 +255,126 @@ router.get('/financiero', async (req, res) => {
   }
 });
 
+// Asigna automáticamente el repartidor aprobado y con GPS activo más cercano al retiro.
+// Se usa al crear el pedido y también en la revisión periódica de pedidos pendientes.
+// Devuelve el repartidor asignado (con distanciaKm) o null si no hay nadie disponible.
+async function asignarRepartidorAutomatico(conn, pedidoId, origenLat, origenLng) {
+    const MAX_PEDIDOS_ACTIVOS_POR_REPARTIDOR = 3;
+    // Solo cuenta como disponible quien mandó su ubicación en las últimas 2 horas:
+    // si cerró la app, el GPS queda marcado como activo pero sin actualizarse.
+    const MAX_SEGUNDOS_UBICACION_VIGENTE = 7200; // 2 horas: tolera pantalla bloqueada mientras maneja
+
+    const [repartidoresDisponibles] = await conn.query(
+      `SELECT r.id, r.usuario_id, r.ubicacion_lat, r.ubicacion_lng
+       FROM repartidores r
+       WHERE r.estado_aprobacion = 'aprobado'
+         AND r.gps_activo = TRUE
+         AND r.ubicacion_actualizada IS NOT NULL
+         AND TIMESTAMPDIFF(SECOND, r.ubicacion_actualizada, NOW()) <= ?
+         AND r.ubicacion_lat IS NOT NULL
+         AND r.ubicacion_lng IS NOT NULL
+         AND (
+           SELECT COUNT(*) FROM pedidos p
+           WHERE p.repartidor_id = r.id
+             AND p.estado IN ('asignado', 'en_retiro', 'en_camino')
+         ) < ?
+         AND NOT EXISTS (
+           SELECT 1 FROM liquidaciones l
+           WHERE l.repartidor_id = r.id
+             AND l.direccion_pago = 'repartidor_paga'
+             AND l.estado != 'pagado'
+             AND l.fecha_fin < ?
+         )`,
+      [MAX_SEGUNDOS_UBICACION_VIGENTE, MAX_PEDIDOS_ACTIVOS_POR_REPARTIDOR, lunesDeEstaSemana()]
+    );
+
+    let repartidorAsignado = null;
+
+    if (Number.isFinite(origenLat) && Number.isFinite(origenLng) && repartidoresDisponibles.length > 0) {
+      repartidorAsignado = repartidoresDisponibles
+        .map(repartidor => ({
+          ...repartidor,
+          distanciaKm: distanciaEntrePuntosKm(
+            origenLat,
+            origenLng,
+            Number(repartidor.ubicacion_lat),
+            Number(repartidor.ubicacion_lng)
+          )
+        }))
+        // Solo se asignan automáticamente los repartidores que están dentro
+        // del radio de retiro permitido. Los que están más lejos no reciben
+        // este pedido (aunque estén disponibles).
+        .filter(repartidor => repartidor.distanciaKm <= RADIO_MAXIMO_ASIGNACION_KM)
+        .sort((a, b) => a.distanciaKm - b.distanciaKm)[0] || null;
+
+      // Puede que haya repartidores disponibles pero que ninguno esté dentro
+      // del radio permitido: en ese caso el pedido queda sin asignar, igual
+      // que cuando no hay repartidores disponibles.
+      if (repartidorAsignado) {
+        // La condición evita pisar un pedido que mientras tanto se canceló o
+        // que el administrador ya asignó a mano.
+        const [actualizacion] = await conn.query(
+          "UPDATE pedidos SET repartidor_id = ?, estado = 'asignado' WHERE id = ? AND estado = 'pendiente' AND repartidor_id IS NULL",
+          [repartidorAsignado.id, pedidoId]
+        );
+        if (actualizacion.affectedRows === 0) return null;
+
+        // No se espera la respuesta del push para no demorarle la
+        // confirmación del pedido al cliente que lo está creando.
+        enviarPushAUsuario(repartidorAsignado.usuario_id, {
+          titulo: 'JMMotocourier',
+          cuerpo: `¡Nuevo pedido asignado! Pedido #${pedidoId}.`,
+          pedidoId: pedidoId
+        }).catch(error => console.error('Error al enviar push de asignación automática:', error.message));
+      }
+    }
+
+  return repartidorAsignado;
+}
+
+// Revisión periódica: los pedidos que quedaron pendientes porque no había
+// ningún repartidor disponible cerca se asignan solos apenas aparece uno.
+// Solo se miran los pedidos de las últimas 3 horas y dentro del horario de
+// servicio, para no asignarle de golpe un pedido viejo y olvidado a alguien.
+const MAX_SEGUNDOS_PEDIDO_PENDIENTE = 3 * 60 * 60;
+let revisandoPendientes = false;
+
+async function reasignarPedidosPendientes() {
+  if (revisandoPendientes || !dentroDelHorarioDeServicio()) return;
+  revisandoPendientes = true;
+  let conn;
+  try {
+    conn = await pool.getConnection();
+    const [pendientes] = await conn.query(
+      `SELECT id, cliente_id, origen_lat, origen_lng
+       FROM pedidos
+       WHERE estado = 'pendiente' AND repartidor_id IS NULL
+         AND TIMESTAMPDIFF(SECOND, fecha_creacion, NOW()) <= ?
+       ORDER BY fecha_creacion ASC`,
+      [MAX_SEGUNDOS_PEDIDO_PENDIENTE]
+    );
+
+    for (const pedido of pendientes) {
+      const repartidor = await asignarRepartidorAutomatico(
+        conn, pedido.id, Number(pedido.origen_lat), Number(pedido.origen_lng)
+      );
+      if (!repartidor) continue;
+
+      console.log(`🔁 Pedido #${pedido.id} pendiente asignado automáticamente al repartidor ${repartidor.id}`);
+      enviarPushAUsuario(pedido.cliente_id, {
+        titulo: 'JMMotocourier',
+        cuerpo: `¡Tu pedido #${pedido.id} fue asignado a un repartidor!`,
+        pedidoId: pedido.id
+      }).catch(error => console.error('Error al avisar al cliente de la asignación:', error.message));
+    }
+  } catch (error) {
+    console.error('Error al revisar pedidos pendientes:', error.message);
+  } finally {
+    if (conn) conn.release();
+    revisandoPendientes = false;
+  }
+}
+
 // POST /api/pedidos
 router.post('/', async (req, res) => {
   let conn;
@@ -357,73 +477,7 @@ router.post('/', async (req, res) => {
       ]
     );
 
-    // Asigna automáticamente el repartidor aprobado y con GPS activo más cercano al retiro
-    const MAX_PEDIDOS_ACTIVOS_POR_REPARTIDOR = 3;
-    // Solo cuenta como disponible quien mandó su ubicación en las últimas 2 horas:
-    // si cerró la app, el GPS queda marcado como activo pero sin actualizarse.
-    const MAX_SEGUNDOS_UBICACION_VIGENTE = 7200; // 2 horas: tolera pantalla bloqueada mientras maneja
-
-    const [repartidoresDisponibles] = await conn.query(
-      `SELECT r.id, r.usuario_id, r.ubicacion_lat, r.ubicacion_lng
-       FROM repartidores r
-       WHERE r.estado_aprobacion = 'aprobado'
-         AND r.gps_activo = TRUE
-         AND r.ubicacion_actualizada IS NOT NULL
-         AND TIMESTAMPDIFF(SECOND, r.ubicacion_actualizada, NOW()) <= ?
-         AND r.ubicacion_lat IS NOT NULL
-         AND r.ubicacion_lng IS NOT NULL
-         AND (
-           SELECT COUNT(*) FROM pedidos p
-           WHERE p.repartidor_id = r.id
-             AND p.estado IN ('asignado', 'en_retiro', 'en_camino')
-         ) < ?
-         AND NOT EXISTS (
-           SELECT 1 FROM liquidaciones l
-           WHERE l.repartidor_id = r.id
-             AND l.direccion_pago = 'repartidor_paga'
-             AND l.estado != 'pagado'
-             AND l.fecha_fin < ?
-         )`,
-      [MAX_SEGUNDOS_UBICACION_VIGENTE, MAX_PEDIDOS_ACTIVOS_POR_REPARTIDOR, lunesDeEstaSemana()]
-    );
-
-    let repartidorAsignado = null;
-
-    if (Number.isFinite(origenLat) && Number.isFinite(origenLng) && repartidoresDisponibles.length > 0) {
-      repartidorAsignado = repartidoresDisponibles
-        .map(repartidor => ({
-          ...repartidor,
-          distanciaKm: distanciaEntrePuntosKm(
-            origenLat,
-            origenLng,
-            Number(repartidor.ubicacion_lat),
-            Number(repartidor.ubicacion_lng)
-          )
-        }))
-        // Solo se asignan automáticamente los repartidores que están dentro
-        // del radio de retiro permitido. Los que están más lejos no reciben
-        // este pedido (aunque estén disponibles).
-        .filter(repartidor => repartidor.distanciaKm <= RADIO_MAXIMO_ASIGNACION_KM)
-        .sort((a, b) => a.distanciaKm - b.distanciaKm)[0] || null;
-
-      // Puede que haya repartidores disponibles pero que ninguno esté dentro
-      // del radio permitido: en ese caso el pedido queda sin asignar, igual
-      // que cuando no hay repartidores disponibles.
-      if (repartidorAsignado) {
-        await conn.query(
-          'UPDATE pedidos SET repartidor_id = ?, estado = ? WHERE id = ?',
-          [repartidorAsignado.id, 'asignado', result.insertId]
-        );
-
-        // No se espera la respuesta del push para no demorarle la
-        // confirmación del pedido al cliente que lo está creando.
-        enviarPushAUsuario(repartidorAsignado.usuario_id, {
-          titulo: 'JMMotocourier',
-          cuerpo: `¡Nuevo pedido asignado! Pedido #${result.insertId}.`,
-          pedidoId: result.insertId
-        }).catch(error => console.error('Error al enviar push de asignación automática:', error.message));
-      }
-    }
+    const repartidorAsignado = await asignarRepartidorAutomatico(conn, result.insertId, origenLat, origenLng);
 
     res.json({
       id: result.insertId,
@@ -686,5 +740,7 @@ router.put('/:id/calificacion', async (req, res) => {
     if (conn) conn.release();
   }
 });
+
+router.reasignarPedidosPendientes = reasignarPedidosPendientes;
 
 module.exports = router;

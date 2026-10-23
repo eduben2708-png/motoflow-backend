@@ -355,6 +355,13 @@ crearTablaLiquidaciones();
 crearTablaMensajes();
 crearTablaPushSubscriptions();
 
+// Cada 30 segundos se revisan los pedidos que quedaron pendientes por falta de
+// repartidores y se asignan apenas aparece uno disponible cerca.
+setInterval(() => {
+  require('./routes/pedidos').reasignarPedidosPendientes()
+    .catch(error => console.error('Error en la revisión de pendientes:', error.message));
+}, 30000);
+
 module.exports = app;
 
 
