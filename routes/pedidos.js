@@ -359,12 +359,17 @@ router.post('/', async (req, res) => {
 
     // Asigna automáticamente el repartidor aprobado y con GPS activo más cercano al retiro
     const MAX_PEDIDOS_ACTIVOS_POR_REPARTIDOR = 3;
+    // Solo cuenta como disponible quien mandó su ubicación en las últimas 2 horas:
+    // si cerró la app, el GPS queda marcado como activo pero sin actualizarse.
+    const MAX_SEGUNDOS_UBICACION_VIGENTE = 7200; // 2 horas: tolera pantalla bloqueada mientras maneja
 
     const [repartidoresDisponibles] = await conn.query(
       `SELECT r.id, r.usuario_id, r.ubicacion_lat, r.ubicacion_lng
        FROM repartidores r
        WHERE r.estado_aprobacion = 'aprobado'
          AND r.gps_activo = TRUE
+         AND r.ubicacion_actualizada IS NOT NULL
+         AND TIMESTAMPDIFF(SECOND, r.ubicacion_actualizada, NOW()) <= ?
          AND r.ubicacion_lat IS NOT NULL
          AND r.ubicacion_lng IS NOT NULL
          AND (
@@ -379,7 +384,7 @@ router.post('/', async (req, res) => {
              AND l.estado != 'pagado'
              AND l.fecha_fin < ?
          )`,
-      [MAX_PEDIDOS_ACTIVOS_POR_REPARTIDOR, lunesDeEstaSemana()]
+      [MAX_SEGUNDOS_UBICACION_VIGENTE, MAX_PEDIDOS_ACTIVOS_POR_REPARTIDOR, lunesDeEstaSemana()]
     );
 
     let repartidorAsignado = null;
@@ -479,14 +484,17 @@ router.put('/:id', async (req, res) => {
 
       if (Number(pedidoActual.repartidor_id) !== Number(repartidor_id)) {
         const [[destino]] = await conn.query(
-          'SELECT estado_aprobacion, gps_activo FROM repartidores WHERE id = ?',
+          `SELECT estado_aprobacion, gps_activo,
+                  TIMESTAMPDIFF(SECOND, ubicacion_actualizada, NOW()) AS segundos_desde_ubicacion
+           FROM repartidores WHERE id = ?`,
           [repartidor_id]
         );
         if (!destino || destino.estado_aprobacion !== 'aprobado') {
           return res.status(400).json({ error: 'Ese repartidor no existe o no está aprobado.' });
         }
-        if (!destino.gps_activo) {
-          return res.status(400).json({ error: 'No se puede asignar: ese repartidor no tiene el GPS activo.' });
+        const ubicacionVigente = destino.segundos_desde_ubicacion !== null && Number(destino.segundos_desde_ubicacion) <= 7200;
+        if (!destino.gps_activo || !ubicacionVigente) {
+          return res.status(400).json({ error: 'No se puede asignar: ese repartidor no tiene el GPS activo (no envía su ubicación hace más de 2 horas).' });
         }
       }
     }
