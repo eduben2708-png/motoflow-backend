@@ -497,6 +497,63 @@ router.post('/', async (req, res) => {
   }
 });
 
+// PUT /api/pedidos/:id/cancelar
+// El cliente cancela su propio pedido mientras el repartidor todavía no salió
+// hacia el retiro (pendiente o asignado). Después de eso tiene que hablar con
+// el repartidor por el chat, o con el administrador.
+router.put('/:id/cancelar', async (req, res) => {
+  let conn;
+  try {
+    const { id } = req.params;
+    const clienteId = Number(req.body.cliente_id);
+
+    conn = await pool.getConnection();
+
+    const [[pedido]] = await conn.query(
+      'SELECT cliente_id, estado, repartidor_id FROM pedidos WHERE id = ?',
+      [id]
+    );
+    if (!pedido) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    if (!Number.isFinite(clienteId) || Number(pedido.cliente_id) !== clienteId) {
+      return res.status(403).json({ error: 'Solo podés cancelar tus propios pedidos.' });
+    }
+    if (!['pendiente', 'asignado'].includes(pedido.estado)) {
+      const motivo = pedido.estado === 'cancelado'
+        ? 'Este pedido ya fue cancelado.'
+        : 'El repartidor ya salió hacia el retiro, así que no se puede cancelar desde la app. Escribile por el chat o contactanos por WhatsApp.';
+      return res.status(400).json({ error: motivo });
+    }
+
+    // La condición del estado evita cancelar si el repartidor justo avanzó el pedido.
+    const [actualizacion] = await conn.query(
+      "UPDATE pedidos SET estado = 'cancelado' WHERE id = ? AND estado IN ('pendiente', 'asignado')",
+      [id]
+    );
+    if (actualizacion.affectedRows === 0) {
+      return res.status(409).json({ error: 'El pedido cambió de estado y ya no se puede cancelar desde la app. Escribile al repartidor por el chat.' });
+    }
+
+    if (pedido.repartidor_id) {
+      const [[repartidorInfo]] = await conn.query('SELECT usuario_id FROM repartidores WHERE id = ?', [pedido.repartidor_id]);
+      if (repartidorInfo) {
+        enviarPushAUsuario(repartidorInfo.usuario_id, {
+          titulo: 'JMMotocourier',
+          cuerpo: `El cliente canceló el pedido #${id}. Ya no tenés que ir.`,
+          pedidoId: Number(id)
+        }).catch(error => console.error('Error al avisar la cancelación al repartidor:', error.message));
+      }
+    }
+
+    res.json({ success: true, message: 'Pedido cancelado' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
 // PUT /api/pedidos/:id
 router.put('/:id', async (req, res) => {
   let conn;
