@@ -335,12 +335,15 @@ async function asignarRepartidorAutomatico(conn, pedidoId, origenLat, origenLng)
 // Revisión periódica: los pedidos que quedaron pendientes porque no había
 // ningún repartidor disponible cerca se asignan solos apenas aparece uno.
 // Solo se miran los pedidos de las últimas 3 horas y dentro del horario de
-// servicio, para no asignarle de golpe un pedido viejo y olvidado a alguien.
+// servicio (si el control de horario está activo), para no asignarle de golpe
+// un pedido viejo y olvidado a alguien.
 const MAX_SEGUNDOS_PEDIDO_PENDIENTE = 3 * 60 * 60;
 let revisandoPendientes = false;
 
 async function reasignarPedidosPendientes() {
-  if (revisandoPendientes || !dentroDelHorarioDeServicio()) return;
+  // Respeta el mismo interruptor que el bloqueo de horario al crear pedidos
+  // (HORARIO_ATENCION_ACTIVO): mientras esté apagado, revisa a cualquier hora.
+  if (revisandoPendientes || (horarioDeAtencionActivo() && !dentroDelHorarioDeServicio())) return;
   revisandoPendientes = true;
   let conn;
   try {
@@ -455,6 +458,27 @@ router.post('/', async (req, res) => {
 
     conn = await pool.getConnection();
 
+    // Doble toque en "Confirmar pedido": si el mismo cliente ya mandó un pedido
+    // idéntico (mismos puntos de retiro y entrega) hace menos de 30 segundos y
+    // sigue vigente, no se crea otro: se devuelve el que ya existe.
+    const [pedidosIguales] = await conn.query(
+      `SELECT id, monto, repartidor_id FROM pedidos
+       WHERE cliente_id = ? AND estado != 'cancelado'
+         AND ABS(origen_lat - ?) < 0.00001 AND ABS(origen_lng - ?) < 0.00001
+         AND ABS(destino_lat - ?) < 0.00001 AND ABS(destino_lng - ?) < 0.00001
+         AND TIMESTAMPDIFF(SECOND, fecha_creacion, NOW()) <= 30
+       ORDER BY id DESC LIMIT 1`,
+      [cliente_id, origenLat, origenLng, destinoLat, destinoLng]
+    );
+    if (pedidosIguales.length > 0) {
+      return res.json({
+        id: pedidosIguales[0].id,
+        monto_total: Number(pedidosIguales[0].monto),
+        repartidor_id: pedidosIguales[0].repartidor_id,
+        duplicado: true
+      });
+    }
+
     // Guardamos las direcciones completas con el nombre del negocio si fue ingresado
     const dirOrigenFinal = origen_nombre ? `${origen_nombre} (${origen_direccion || ''})` : origen_direccion;
     const dirDestinoFinal = destino_nombre ? `${destino_nombre} (${destino_direccion || ''})` : destino_direccion;
@@ -528,7 +552,7 @@ router.put('/:id/cancelar', async (req, res) => {
 
     // La condición del estado evita cancelar si el repartidor justo avanzó el pedido.
     const [actualizacion] = await conn.query(
-      "UPDATE pedidos SET estado = 'cancelado' WHERE id = ? AND estado IN ('pendiente', 'asignado')",
+      "UPDATE pedidos SET estado = 'cancelado', cancelado_por = 'cliente', fecha_cancelacion = NOW() WHERE id = ? AND estado IN ('pendiente', 'asignado')",
       [id]
     );
     if (actualizacion.affectedRows === 0) {
@@ -544,6 +568,24 @@ router.put('/:id/cancelar', async (req, res) => {
           pedidoId: Number(id)
         }).catch(error => console.error('Error al avisar la cancelación al repartidor:', error.message));
       }
+    }
+
+    // Aviso a los administradores: sin esto, un pedido ya asignado que el
+    // cliente cancela desaparece del panel sin que nadie se entere.
+    try {
+      const [[cliente]] = await conn.query('SELECT nombre FROM usuarios WHERE id = ?', [clienteId]);
+      const [administradores] = await conn.query("SELECT id FROM usuarios WHERE rol = 'admin'");
+      const quien = (cliente && cliente.nombre) ? cliente.nombre : `Cliente #${clienteId}`;
+      const detalle = pedido.repartidor_id ? ' (ya estaba asignado a un repartidor)' : '';
+      administradores.forEach(admin => {
+        enviarPushAUsuario(admin.id, {
+          titulo: 'JMMotocourier',
+          cuerpo: `${quien} canceló el pedido #${id}${detalle}.`,
+          pedidoId: Number(id)
+        }).catch(error => console.error('Error al avisar la cancelación al administrador:', error.message));
+      });
+    } catch (error) {
+      console.error('Error al preparar el aviso de cancelación al administrador:', error.message);
     }
 
     res.json({ success: true, message: 'Pedido cancelado' });
@@ -611,6 +653,13 @@ router.put('/:id', async (req, res) => {
     }
 
     const camposActualizar = ['estado = ?'];
+    // Se deja constancia de quién canceló y cuándo (COALESCE conserva el dato
+    // original si el pedido ya estaba cancelado); si se reactiva, se borra.
+    if (estado === 'cancelado') {
+      camposActualizar.push("cancelado_por = COALESCE(cancelado_por, 'admin')", 'fecha_cancelacion = COALESCE(fecha_cancelacion, NOW())');
+    } else {
+      camposActualizar.push('cancelado_por = NULL', 'fecha_cancelacion = NULL');
+    }
     const valoresActualizar = [estado];
 
     if (tieneRepartidor) {

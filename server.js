@@ -245,6 +245,21 @@ async function crearTablaPedidos() {
       // Ya existe la columna: es esperable en cada reinicio a partir del primero.
     }
 
+    // Quién canceló el pedido ('cliente' o 'admin') y cuándo.
+    try {
+      await conn.query("ALTER TABLE pedidos ADD COLUMN cancelado_por VARCHAR(20) NULL");
+      console.log('✓ Columna "cancelado_por" agregada a "pedidos"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
+    try {
+      await conn.query('ALTER TABLE pedidos ADD COLUMN fecha_cancelacion TIMESTAMP NULL');
+      console.log('✓ Columna "fecha_cancelacion" agregada a "pedidos"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
     console.log('✓ Tabla pedidos verificada');
   } catch (error) {
     console.error('❌ Error en tabla pedidos:', error.message);
