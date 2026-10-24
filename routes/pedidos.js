@@ -117,7 +117,8 @@ router.get('/', async (req, res) => {
   try {
     const conn = await pool.getConnection();
     const [pedidos] = await conn.query(
-      `SELECT p.*, uc.nombre AS cliente_nombre, uc.telefono AS cliente_telefono
+      `SELECT p.*, uc.nombre AS cliente_nombre, uc.telefono AS cliente_telefono,
+              TIMESTAMPDIFF(SECOND, p.asignado_en, NOW()) AS segundos_desde_asignacion
        FROM pedidos p
        LEFT JOIN usuarios uc ON p.cliente_id = uc.id`
     );
@@ -255,22 +256,34 @@ router.get('/financiero', async (req, res) => {
   }
 });
 
+// Tiempo que tiene el repartidor para aceptar un pedido que se le asignó solo.
+// Si no lo acepta a tiempo (o lo rechaza), el pedido pasa al siguiente repartidor.
+const SEGUNDOS_PARA_ACEPTAR = 120;
+// Se prefiere a quien reportó su ubicación hace menos de 5 minutos; solo si no
+// hay ninguno así de reciente se usa a quien reportó hace más (hasta 2 horas).
+const SEGUNDOS_UBICACION_FRESCA = 300;
+// Si un pedido sigue sin repartidor pasado este tiempo, se le avisa al administrador.
+const SEGUNDOS_AVISO_ADMIN_SIN_REPARTIDOR = 180;
+
 // Asigna automáticamente el repartidor aprobado y con GPS activo más cercano al retiro.
 // Se usa al crear el pedido y también en la revisión periódica de pedidos pendientes.
-// Devuelve el repartidor asignado (con distanciaKm) o null si no hay nadie disponible.
-async function asignarRepartidorAutomatico(conn, pedidoId, origenLat, origenLng) {
+// "descartados" son los ids (separados por coma) de repartidores que ya rechazaron
+// o dejaron vencer este pedido. Devuelve el repartidor asignado o null.
+async function asignarRepartidorAutomatico(conn, pedidoId, origenLat, origenLng, descartados = '') {
     const MAX_PEDIDOS_ACTIVOS_POR_REPARTIDOR = 3;
     // Solo cuenta como disponible quien mandó su ubicación en las últimas 2 horas:
     // si cerró la app, el GPS queda marcado como activo pero sin actualizarse.
     const MAX_SEGUNDOS_UBICACION_VIGENTE = 7200; // 2 horas: tolera pantalla bloqueada mientras maneja
 
     const [repartidoresDisponibles] = await conn.query(
-      `SELECT r.id, r.usuario_id, r.ubicacion_lat, r.ubicacion_lng
+      `SELECT r.id, r.usuario_id, r.ubicacion_lat, r.ubicacion_lng,
+              TIMESTAMPDIFF(SECOND, r.ubicacion_actualizada, NOW()) AS segundos_ubicacion
        FROM repartidores r
        WHERE r.estado_aprobacion = 'aprobado'
          AND r.gps_activo = TRUE
          AND r.ubicacion_actualizada IS NOT NULL
          AND TIMESTAMPDIFF(SECOND, r.ubicacion_actualizada, NOW()) <= ?
+         AND FIND_IN_SET(r.id, ?) = 0
          AND r.ubicacion_lat IS NOT NULL
          AND r.ubicacion_lng IS NOT NULL
          AND (
@@ -285,13 +298,16 @@ async function asignarRepartidorAutomatico(conn, pedidoId, origenLat, origenLng)
              AND l.estado != 'pagado'
              AND l.fecha_fin < ?
          )`,
-      [MAX_SEGUNDOS_UBICACION_VIGENTE, MAX_PEDIDOS_ACTIVOS_POR_REPARTIDOR, lunesDeEstaSemana()]
+      [MAX_SEGUNDOS_UBICACION_VIGENTE, descartados || '', MAX_PEDIDOS_ACTIVOS_POR_REPARTIDOR, lunesDeEstaSemana()]
     );
 
     let repartidorAsignado = null;
 
     if (Number.isFinite(origenLat) && Number.isFinite(origenLng) && repartidoresDisponibles.length > 0) {
-      repartidorAsignado = repartidoresDisponibles
+      // Solo se asignan automáticamente los repartidores que están dentro
+      // del radio de retiro permitido. Los que están más lejos no reciben
+      // este pedido (aunque estén disponibles).
+      const enRadio = repartidoresDisponibles
         .map(repartidor => ({
           ...repartidor,
           distanciaKm: distanciaEntrePuntosKm(
@@ -301,20 +317,23 @@ async function asignarRepartidorAutomatico(conn, pedidoId, origenLat, origenLng)
             Number(repartidor.ubicacion_lng)
           )
         }))
-        // Solo se asignan automáticamente los repartidores que están dentro
-        // del radio de retiro permitido. Los que están más lejos no reciben
-        // este pedido (aunque estén disponibles).
         .filter(repartidor => repartidor.distanciaKm <= RADIO_MAXIMO_ASIGNACION_KM)
-        .sort((a, b) => a.distanciaKm - b.distanciaKm)[0] || null;
+        .sort((a, b) => a.distanciaKm - b.distanciaKm);
+
+      // Primero el más cercano entre los de ubicación reciente; si no hay,
+      // el más cercano entre los demás.
+      const conUbicacionFresca = enRadio.filter(r => Number(r.segundos_ubicacion) <= SEGUNDOS_UBICACION_FRESCA);
+      repartidorAsignado = conUbicacionFresca[0] || enRadio[0] || null;
 
       // Puede que haya repartidores disponibles pero que ninguno esté dentro
       // del radio permitido: en ese caso el pedido queda sin asignar, igual
       // que cuando no hay repartidores disponibles.
       if (repartidorAsignado) {
         // La condición evita pisar un pedido que mientras tanto se canceló o
-        // que el administrador ya asignó a mano.
+        // que el administrador ya asignó a mano. El pedido queda "asignado" pero
+        // sin aceptar (aceptado_en vacío) hasta que el repartidor lo acepte.
         const [actualizacion] = await conn.query(
-          "UPDATE pedidos SET repartidor_id = ?, estado = 'asignado' WHERE id = ? AND estado = 'pendiente' AND repartidor_id IS NULL",
+          "UPDATE pedidos SET repartidor_id = ?, estado = 'asignado', asignado_en = NOW(), aceptado_en = NULL WHERE id = ? AND estado = 'pendiente' AND repartidor_id IS NULL",
           [repartidorAsignado.id, pedidoId]
         );
         if (actualizacion.affectedRows === 0) return null;
@@ -323,7 +342,7 @@ async function asignarRepartidorAutomatico(conn, pedidoId, origenLat, origenLng)
         // confirmación del pedido al cliente que lo está creando.
         enviarPushAUsuario(repartidorAsignado.usuario_id, {
           titulo: 'JMMotocourier',
-          cuerpo: `¡Nuevo pedido asignado! Pedido #${pedidoId}.`,
+          cuerpo: `¡Pedido nuevo #${pedidoId}! Abrí la app y aceptalo en los próximos 2 minutos.`,
           pedidoId: pedidoId
         }).catch(error => console.error('Error al enviar push de asignación automática:', error.message));
       }
@@ -332,8 +351,32 @@ async function asignarRepartidorAutomatico(conn, pedidoId, origenLat, origenLng)
   return repartidorAsignado;
 }
 
-// Revisión periódica: los pedidos que quedaron pendientes porque no había
-// ningún repartidor disponible cerca se asignan solos apenas aparece uno.
+// Devuelve el pedido a "pendiente" cuando el repartidor lo rechazó o no lo
+// aceptó a tiempo, y anota su id para no volver a ofrecérselo. Devuelve true
+// si efectivamente lo liberó (false si ya lo había aceptado o cambió de estado).
+async function liberarPedidoNoAceptado(conn, pedidoId, repartidorId) {
+  const [resultado] = await conn.query(
+    `UPDATE pedidos
+     SET estado = 'pendiente', repartidor_id = NULL, asignado_en = NULL, aceptado_en = NULL,
+         repartidores_descartados = CONCAT_WS(',', NULLIF(repartidores_descartados, ''), ?)
+     WHERE id = ? AND estado = 'asignado' AND repartidor_id = ? AND aceptado_en IS NULL`,
+    [String(repartidorId), pedidoId, repartidorId]
+  );
+  return resultado.affectedRows > 0;
+}
+
+async function avisarAAdministradores(conn, cuerpo, pedidoId) {
+  const [administradores] = await conn.query("SELECT id FROM usuarios WHERE rol = 'admin'");
+  administradores.forEach(admin => {
+    enviarPushAUsuario(admin.id, { titulo: 'JMMotocourier', cuerpo, pedidoId: Number(pedidoId) })
+      .catch(error => console.error('Error al avisar al administrador:', error.message));
+  });
+}
+
+// Revisión periódica (cada 30 segundos):
+//  1) los pedidos asignados que el repartidor no aceptó a tiempo pasan al siguiente;
+//  2) los pedidos que quedaron pendientes se asignan apenas aparece un repartidor
+//     disponible cerca, y si siguen sin repartidor se le avisa al administrador.
 // Solo se miran los pedidos de las últimas 3 horas y dentro del horario de
 // servicio (si el control de horario está activo), para no asignarle de golpe
 // un pedido viejo y olvidado a alguien.
@@ -341,15 +384,41 @@ const MAX_SEGUNDOS_PEDIDO_PENDIENTE = 3 * 60 * 60;
 let revisandoPendientes = false;
 
 async function reasignarPedidosPendientes() {
-  // Respeta el mismo interruptor que el bloqueo de horario al crear pedidos
-  // (HORARIO_ATENCION_ACTIVO): mientras esté apagado, revisa a cualquier hora.
-  if (revisandoPendientes || (horarioDeAtencionActivo() && !dentroDelHorarioDeServicio())) return;
+  if (revisandoPendientes) return;
   revisandoPendientes = true;
   let conn;
   try {
     conn = await pool.getConnection();
+
+    // 1) Pedidos que no se aceptaron a tiempo.
+    const [vencidos] = await conn.query(
+      `SELECT p.id, p.repartidor_id, r.usuario_id
+       FROM pedidos p
+       LEFT JOIN repartidores r ON r.id = p.repartidor_id
+       WHERE p.estado = 'asignado' AND p.aceptado_en IS NULL AND p.asignado_en IS NOT NULL
+         AND TIMESTAMPDIFF(SECOND, p.asignado_en, NOW()) > ?`,
+      [SEGUNDOS_PARA_ACEPTAR]
+    );
+    for (const pedido of vencidos) {
+      if (!(await liberarPedidoNoAceptado(conn, pedido.id, pedido.repartidor_id))) continue;
+      console.log(`⏱️ Pedido #${pedido.id}: el repartidor ${pedido.repartidor_id} no lo aceptó a tiempo`);
+      if (pedido.usuario_id) {
+        enviarPushAUsuario(pedido.usuario_id, {
+          titulo: 'JMMotocourier',
+          cuerpo: `El pedido #${pedido.id} pasó a otro repartidor porque no lo aceptaste a tiempo.`,
+          pedidoId: pedido.id
+        }).catch(error => console.error('Error al avisar el vencimiento al repartidor:', error.message));
+      }
+    }
+
+    // Respeta el mismo interruptor que el bloqueo de horario al crear pedidos
+    // (HORARIO_ATENCION_ACTIVO): mientras esté apagado, revisa a cualquier hora.
+    if (horarioDeAtencionActivo() && !dentroDelHorarioDeServicio()) return;
+
+    // 2) Pedidos pendientes sin repartidor.
     const [pendientes] = await conn.query(
-      `SELECT id, cliente_id, origen_lat, origen_lng
+      `SELECT id, origen_lat, origen_lng, repartidores_descartados, aviso_admin_pendiente,
+              TIMESTAMPDIFF(SECOND, fecha_creacion, NOW()) AS segundos_esperando
        FROM pedidos
        WHERE estado = 'pendiente' AND repartidor_id IS NULL
          AND TIMESTAMPDIFF(SECOND, fecha_creacion, NOW()) <= ?
@@ -359,16 +428,23 @@ async function reasignarPedidosPendientes() {
 
     for (const pedido of pendientes) {
       const repartidor = await asignarRepartidorAutomatico(
-        conn, pedido.id, Number(pedido.origen_lat), Number(pedido.origen_lng)
+        conn, pedido.id, Number(pedido.origen_lat), Number(pedido.origen_lng), pedido.repartidores_descartados
       );
-      if (!repartidor) continue;
+      if (repartidor) {
+        console.log(`🔁 Pedido #${pedido.id} pendiente ofrecido al repartidor ${repartidor.id}`);
+        continue;
+      }
 
-      console.log(`🔁 Pedido #${pedido.id} pendiente asignado automáticamente al repartidor ${repartidor.id}`);
-      enviarPushAUsuario(pedido.cliente_id, {
-        titulo: 'JMMotocourier',
-        cuerpo: `¡Tu pedido #${pedido.id} fue asignado a un repartidor!`,
-        pedidoId: pedido.id
-      }).catch(error => console.error('Error al avisar al cliente de la asignación:', error.message));
+      // Si todos los disponibles ya lo rechazaron o lo dejaron vencer, tras unos
+      // minutos se vuelve a empezar la ronda desde cero.
+      if (pedido.repartidores_descartados && Number(pedido.segundos_esperando) >= 300) {
+        await conn.query("UPDATE pedidos SET repartidores_descartados = NULL WHERE id = ? AND estado = 'pendiente'", [pedido.id]);
+      }
+
+      if (!pedido.aviso_admin_pendiente && Number(pedido.segundos_esperando) >= SEGUNDOS_AVISO_ADMIN_SIN_REPARTIDOR) {
+        await conn.query('UPDATE pedidos SET aviso_admin_pendiente = 1 WHERE id = ?', [pedido.id]);
+        await avisarAAdministradores(conn, `El pedido #${pedido.id} sigue sin repartidor. Asignalo a mano desde Admin.`, pedido.id);
+      }
     }
   } catch (error) {
     console.error('Error al revisar pedidos pendientes:', error.message);
@@ -521,6 +597,71 @@ router.post('/', async (req, res) => {
   }
 });
 
+// PUT /api/pedidos/:id/aceptar
+// El repartidor acepta el pedido que se le asignó. Hasta ese momento el pedido
+// está "asignado" pero a prueba: si no lo acepta a tiempo pasa a otro repartidor.
+router.put('/:id/aceptar', async (req, res) => {
+  let conn;
+  try {
+    const { id } = req.params;
+    const repartidorId = Number(req.body.repartidor_id);
+    conn = await pool.getConnection();
+
+    const [actualizacion] = await conn.query(
+      "UPDATE pedidos SET aceptado_en = NOW() WHERE id = ? AND repartidor_id = ? AND estado = 'asignado' AND aceptado_en IS NULL",
+      [id, repartidorId]
+    );
+
+    if (actualizacion.affectedRows === 0) {
+      // Si ya lo había aceptado (doble toque), se responde que está bien.
+      const [[pedido]] = await conn.query('SELECT repartidor_id, estado, aceptado_en FROM pedidos WHERE id = ?', [id]);
+      if (pedido && Number(pedido.repartidor_id) === repartidorId && pedido.aceptado_en) {
+        return res.json({ success: true, message: 'Pedido ya aceptado' });
+      }
+      return res.status(409).json({ error: 'Este pedido ya no está disponible: pasó a otro repartidor o fue cancelado.' });
+    }
+
+    const [[pedidoAceptado]] = await conn.query('SELECT cliente_id FROM pedidos WHERE id = ?', [id]);
+    if (pedidoAceptado) {
+      enviarPushAUsuario(pedidoAceptado.cliente_id, {
+        titulo: 'JMMotocourier',
+        cuerpo: `¡Un repartidor aceptó tu pedido #${id}!`,
+        pedidoId: Number(id)
+      }).catch(error => console.error('Error al avisar al cliente de la aceptación:', error.message));
+    }
+
+    res.json({ success: true, message: 'Pedido aceptado' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// PUT /api/pedidos/:id/rechazar
+// El repartidor no puede tomar el pedido: vuelve a pendiente y se le ofrece al siguiente.
+router.put('/:id/rechazar', async (req, res) => {
+  let conn;
+  try {
+    const { id } = req.params;
+    const repartidorId = Number(req.body.repartidor_id);
+    conn = await pool.getConnection();
+
+    if (!(await liberarPedidoNoAceptado(conn, id, repartidorId))) {
+      return res.status(409).json({ error: 'Este pedido ya no se puede rechazar: ya lo aceptaste o pasó a otro repartidor.' });
+    }
+
+    // Se le ofrece enseguida al siguiente, sin esperar la revisión de 30 segundos.
+    reasignarPedidosPendientes().catch(error => console.error('Error al reofrecer el pedido:', error.message));
+
+    res.json({ success: true, message: 'Pedido rechazado' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
 // PUT /api/pedidos/:id/cancelar
 // El cliente cancela su propio pedido mientras el repartidor todavía no salió
 // hacia el retiro (pendiente o asignado). Después de eso tiene que hablar con
@@ -574,16 +715,9 @@ router.put('/:id/cancelar', async (req, res) => {
     // cliente cancela desaparece del panel sin que nadie se entere.
     try {
       const [[cliente]] = await conn.query('SELECT nombre FROM usuarios WHERE id = ?', [clienteId]);
-      const [administradores] = await conn.query("SELECT id FROM usuarios WHERE rol = 'admin'");
       const quien = (cliente && cliente.nombre) ? cliente.nombre : `Cliente #${clienteId}`;
       const detalle = pedido.repartidor_id ? ' (ya estaba asignado a un repartidor)' : '';
-      administradores.forEach(admin => {
-        enviarPushAUsuario(admin.id, {
-          titulo: 'JMMotocourier',
-          cuerpo: `${quien} canceló el pedido #${id}${detalle}.`,
-          pedidoId: Number(id)
-        }).catch(error => console.error('Error al avisar la cancelación al administrador:', error.message));
-      });
+      await avisarAAdministradores(conn, `${quien} canceló el pedido #${id}${detalle}.`, id);
     } catch (error) {
       console.error('Error al preparar el aviso de cancelación al administrador:', error.message);
     }
@@ -629,6 +763,7 @@ router.put('/:id', async (req, res) => {
     // Un pedido solo se le puede asignar a un repartidor que esté aprobado y
     // con el GPS activo (igual que la asignación automática). Si el pedido ya
     // tenía a ese mismo repartidor, se deja guardar el cambio de estado.
+    let cambiaRepartidor = false;
     if (tieneRepartidor) {
       const [[pedidoActual]] = await conn.query('SELECT repartidor_id FROM pedidos WHERE id = ?', [id]);
       if (!pedidoActual) {
@@ -636,6 +771,7 @@ router.put('/:id', async (req, res) => {
       }
 
       if (Number(pedidoActual.repartidor_id) !== Number(repartidor_id)) {
+        cambiaRepartidor = true;
         const [[destino]] = await conn.query(
           `SELECT estado_aprobacion, gps_activo,
                   TIMESTAMPDIFF(SECOND, ubicacion_actualizada, NOW()) AS segundos_desde_ubicacion
@@ -659,6 +795,16 @@ router.put('/:id', async (req, res) => {
       camposActualizar.push("cancelado_por = COALESCE(cancelado_por, 'admin')", 'fecha_cancelacion = COALESCE(fecha_cancelacion, NOW())');
     } else {
       camposActualizar.push('cancelado_por = NULL', 'fecha_cancelacion = NULL');
+    }
+    // Asignación manual del administrador: el repartidor no tiene que aceptarla.
+    // Si el repartidor sigue su viaje, queda aceptado de hecho. Si el pedido
+    // vuelve a pendiente, se limpia todo lo de la asignación.
+    if (cambiaRepartidor && estado === 'asignado') {
+      camposActualizar.push('asignado_en = NOW()', 'aceptado_en = NOW()');
+    } else if (['en_retiro', 'en_camino', 'entregado'].includes(estado)) {
+      camposActualizar.push('aceptado_en = COALESCE(aceptado_en, NOW())');
+    } else if (estado === 'pendiente') {
+      camposActualizar.push('asignado_en = NULL', 'aceptado_en = NULL');
     }
     const valoresActualizar = [estado];
 

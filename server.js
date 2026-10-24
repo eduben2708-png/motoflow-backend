@@ -260,6 +260,45 @@ async function crearTablaPedidos() {
       // Ya existe la columna: es esperable en cada reinicio a partir del primero.
     }
 
+    // Aceptación de pedidos por parte del repartidor: cuándo se le asignó, cuándo
+    // aceptó, quiénes ya lo rechazaron (ids separados por coma) y si ya se le avisó
+    // al administrador de que sigue sin repartidor.
+    try {
+      await conn.query('ALTER TABLE pedidos ADD COLUMN asignado_en TIMESTAMP NULL');
+      console.log('✓ Columna "asignado_en" agregada a "pedidos"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
+    try {
+      await conn.query('ALTER TABLE pedidos ADD COLUMN aceptado_en TIMESTAMP NULL');
+      console.log('✓ Columna "aceptado_en" agregada a "pedidos"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
+    try {
+      await conn.query('ALTER TABLE pedidos ADD COLUMN repartidores_descartados VARCHAR(255) NULL');
+      console.log('✓ Columna "repartidores_descartados" agregada a "pedidos"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
+    try {
+      await conn.query('ALTER TABLE pedidos ADD COLUMN aviso_admin_pendiente TINYINT DEFAULT 0');
+      console.log('✓ Columna "aviso_admin_pendiente" agregada a "pedidos"');
+    } catch (error) {
+      // Ya existe la columna: es esperable en cada reinicio a partir del primero.
+    }
+
+    // Pedidos que ya estaban en curso antes de existir la aceptación (no tienen
+    // "asignado_en"): se consideran aceptados para que no venzan solos.
+    try {
+      await conn.query("UPDATE pedidos SET aceptado_en = NOW() WHERE estado IN ('asignado', 'en_retiro', 'en_camino') AND aceptado_en IS NULL AND asignado_en IS NULL");
+    } catch (error) {
+      console.error('Error al marcar pedidos en curso como aceptados:', error.message);
+    }
+
     console.log('✓ Tabla pedidos verificada');
   } catch (error) {
     console.error('❌ Error en tabla pedidos:', error.message);
