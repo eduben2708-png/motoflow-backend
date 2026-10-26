@@ -92,10 +92,11 @@ function distanciaEntrePuntosKm(lat1, lng1, lat2, lng2) {
   return radioTierraKm * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 
-// Recargo por retiro en el centro de Ciudad del Este: la zona más
-// comercial (cerca de Av. San Blas / Monseñor Rodríguez) tiene más
-// tránsito y demora más el retiro, así que se cobra un extra fijo cuando
-// el punto de retiro cae dentro de este radio. Mismo punto que ya se usa
+// Recargo por zona céntrica de Ciudad del Este: la zona más comercial
+// (cerca de Av. San Blas / Monseñor Rodríguez) tiene más tránsito y demora
+// más, así que se cobra un extra fijo (una sola vez) cuando el punto de
+// retiro O el de entrega cae dentro de este radio. Al cliente se le muestra
+// ya sumado a la tarifa, sin detallarlo. Mismo punto que ya se usa
 // para priorizar resultados de búsqueda de direcciones (ver lugares.js).
 const CENTRO_CDE = { lat: -25.5097, lng: -54.6111 };
 const RADIO_CENTRO_KM = 1;
@@ -529,7 +530,7 @@ router.post('/', async (req, res) => {
     }
 
     const comisionEncargo = tipo === 'encargo' ? Math.round(montoCompra * PORCENTAJE_COMISION_ENCARGO) : 0;
-    const recargoCentro = esRetiroEnElCentro(origenLat, origenLng) ? RECARGO_CENTRO : 0;
+    const recargoCentro = (esRetiroEnElCentro(origenLat, origenLng) || esRetiroEnElCentro(destinoLat, destinoLng)) ? RECARGO_CENTRO : 0;
     const montoTotal = detalleTarifa.tarifaServicio + montoCompra + comisionEncargo + recargoCentro;
 
     conn = await pool.getConnection();
