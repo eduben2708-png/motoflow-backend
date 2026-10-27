@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/database');
+const { enviarPushAUsuario } = require('../utils/push');
 
 // GET /vapid-public-key - Le da al frontend la clave pública VAPID para que
 // arme la suscripción push. Así, si algún día hay que rotar las claves, no
@@ -55,6 +56,49 @@ router.post('/desuscribir', async (req, res) => {
     conn = await pool.getConnection();
     await conn.query('DELETE FROM push_subscriptions WHERE endpoint = ?', [endpoint]);
     res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// POST /probar - Prueba de notificación: el repartidor toca "Probar que me lleguen
+// los avisos" y, 8 segundos después (para que alcance a minimizar la app), le
+// llega una notificación. Responde cuántos celulares tiene registrados; si es 0
+// no se manda nada. Hay un tiempo de espera entre pruebas para que no se pueda
+// usar para llenar de avisos a nadie.
+const SEGUNDOS_ANTES_DE_PRUEBA = 8;
+const ultimaPrueba = new Map();
+
+router.post('/probar', async (req, res) => {
+  let conn;
+  try {
+    const usuarioId = Number(req.body.usuario_id);
+    if (!usuarioId) {
+      return res.status(400).json({ error: 'Falta el usuario' });
+    }
+
+    const ahora = Date.now();
+    if (ahora - (ultimaPrueba.get(usuarioId) || 0) < 20000) {
+      return res.status(429).json({ error: 'Esperá unos segundos antes de probar de nuevo.' });
+    }
+    ultimaPrueba.set(usuarioId, ahora);
+
+    conn = await pool.getConnection();
+    const [filas] = await conn.query('SELECT COUNT(*) AS total FROM push_subscriptions WHERE usuario_id = ?', [usuarioId]);
+    const dispositivos = Number(filas[0].total);
+
+    if (dispositivos > 0) {
+      setTimeout(() => {
+        enviarPushAUsuario(usuarioId, {
+          titulo: 'JMMotocourier',
+          cuerpo: 'Prueba: si ves esto, tu celular recibe los avisos de pedidos nuevos.'
+        }).catch(error => console.error('Error en la notificación de prueba:', error.message));
+      }, SEGUNDOS_ANTES_DE_PRUEBA * 1000);
+    }
+
+    res.json({ dispositivos, segundos: SEGUNDOS_ANTES_DE_PRUEBA });
   } catch (error) {
     res.status(500).json({ error: error.message });
   } finally {
