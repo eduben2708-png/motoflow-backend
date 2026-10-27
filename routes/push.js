@@ -63,6 +63,52 @@ router.post('/desuscribir', async (req, res) => {
   }
 });
 
+// POST /fcm/suscribir - La app Android registra el "token" de Firebase de ese
+// celular para el usuario. Como esa app recibe los avisos por Firebase, se borran
+// las suscripciones de push web de ese usuario para no mandarle cada aviso dos veces.
+router.post('/fcm/suscribir', async (req, res) => {
+  let conn;
+  try {
+    const usuarioId = Number(req.body.usuario_id);
+    const token = String(req.body.token || '').trim();
+    if (!usuarioId || token.length < 20) {
+      return res.status(400).json({ error: 'Faltan datos del celular' });
+    }
+
+    conn = await pool.getConnection();
+    await conn.query(
+      `INSERT INTO fcm_tokens (usuario_id, token) VALUES (?, ?)
+       ON DUPLICATE KEY UPDATE usuario_id = VALUES(usuario_id)`,
+      [usuarioId, token]
+    );
+    await conn.query('DELETE FROM push_subscriptions WHERE usuario_id = ?', [usuarioId]);
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// POST /fcm/desuscribir - Se llama al cerrar sesión en la app Android.
+router.post('/fcm/desuscribir', async (req, res) => {
+  let conn;
+  try {
+    const token = String(req.body.token || '').trim();
+    if (!token) {
+      return res.status(400).json({ error: 'Falta el token' });
+    }
+    conn = await pool.getConnection();
+    await conn.query('DELETE FROM fcm_tokens WHERE token = ?', [token]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
 // POST /probar - Prueba de notificación: el repartidor toca "Probar que me lleguen
 // los avisos" y, 8 segundos después (para que alcance a minimizar la app), le
 // llega una notificación. Responde cuántos celulares tiene registrados; si es 0
@@ -87,7 +133,13 @@ router.post('/probar', async (req, res) => {
 
     conn = await pool.getConnection();
     const [filas] = await conn.query('SELECT COUNT(*) AS total FROM push_subscriptions WHERE usuario_id = ?', [usuarioId]);
-    const dispositivos = Number(filas[0].total);
+    let dispositivos = Number(filas[0].total);
+    try {
+      const [filasAndroid] = await conn.query('SELECT COUNT(*) AS total FROM fcm_tokens WHERE usuario_id = ?', [usuarioId]);
+      dispositivos += Number(filasAndroid[0].total);
+    } catch (error) {
+      // La tabla de la app Android todavía no existe: solo cuenta el push web.
+    }
 
     if (dispositivos > 0) {
       setTimeout(() => {

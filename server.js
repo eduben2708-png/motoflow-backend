@@ -299,6 +299,23 @@ async function crearTablaPedidos() {
       console.error('Error al marcar pedidos en curso como aceptados:', error.message);
     }
 
+    // Celulares con la app Android: el "token" de Firebase por usuario, para mandarle
+    // los avisos de pedidos aunque la app esté cerrada.
+    try {
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS fcm_tokens (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          usuario_id INT NOT NULL,
+          token VARCHAR(400) NOT NULL,
+          creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE KEY uk_fcm_token (token(191)),
+          KEY idx_fcm_usuario (usuario_id)
+        )
+      `);
+    } catch (error) {
+      console.error('Error al crear la tabla fcm_tokens:', error.message);
+    }
+
     console.log('✓ Tabla pedidos verificada');
   } catch (error) {
     console.error('❌ Error en tabla pedidos:', error.message);
