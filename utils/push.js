@@ -20,9 +20,12 @@ function obtenerFirebase() {
   try {
     const texto = crudo.startsWith('{') ? crudo : Buffer.from(crudo, 'base64').toString('utf8');
     const credenciales = JSON.parse(texto);
-    const admin = require('firebase-admin');
-    admin.initializeApp({ credential: admin.credential.cert(credenciales) });
-    firebaseAdmin = admin;
+    // firebase-admin 12 o más nuevo: se usan los módulos "app" y "messaging"
+    // (ya no existe admin.credential en el paquete principal).
+    const { initializeApp, cert, getApps, getApp } = require('firebase-admin/app');
+    const { getMessaging } = require('firebase-admin/messaging');
+    const app = getApps().length ? getApp() : initializeApp({ credential: cert(credenciales) });
+    firebaseAdmin = { messaging: () => getMessaging(app) };
     console.log('✓ Firebase listo para enviar avisos a la app Android.');
   } catch (error) {
     console.error('⚠️ No se pudo iniciar Firebase (revisá FIREBASE_SERVICE_ACCOUNT y que esté instalado firebase-admin):', error.message);
