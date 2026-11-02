@@ -18,6 +18,58 @@ function resolverMetodoPagoTarifa(pedido) {
   return METODOS_PAGO_VALIDOS.includes(metodo) ? metodo : 'sin_definir';
 }
 
+// Cuentas de una liquidación a partir de sus pedidos. Está separado de la consulta a la
+// base para poder usar EXACTAMENTE la misma fórmula al calcular una liquidación nueva
+// y al recalcular las pendientes.
+function calcularMontos(pedidos) {
+  const totalTarifas = pedidos.reduce((total, pedido) => total + Number(pedido.tarifa_servicio || 0), 0);
+
+  // Cómo se cobró cada parte de la tarifa (se muestra en la liquidación).
+  const tarifasPorMetodo = { efectivo: 0, transferencia: 0, qr: 0, app: 0, sin_definir: 0 };
+  pedidos.forEach(pedido => {
+    const metodo = resolverMetodoPagoTarifa(pedido);
+    tarifasPorMetodo[metodo] += Number(pedido.tarifa_servicio || 0);
+  });
+  const montoRepartidor = Math.round(totalTarifas * PORCENTAJE_REPARTIDOR);
+  const comisionPlataforma = totalTarifas - montoRepartidor;
+
+  // Lo que el repartidor cobró en efectivo y NO le pertenece a él: 20% de la tarifa de esos
+  // pedidos + la comisión de encargo. El monto_compra NO se toca acá: eso es simplemente
+  // la devolución de lo que el repartidor ya puso de su bolsillo, no hay nada que rendir por eso.
+  //
+  // "Efectivo" se decide con la MISMA regla que el desglose de arriba: si el vendedor pagó la
+  // tarifa al retirar, vale su forma de pago (forma_pago_servicio); si no, la del destinatario
+  // al entregar (tipo_pago). Antes se miraba solo tipo_pago, y un servicio que el vendedor
+  // pagó en efectivo al retirar quedaba como "no cobrado por el repartidor": la cuenta salía
+  // mal y hasta cambiaba quién le debe a quién.
+  const pedidosEfectivo = pedidos.filter(pedido => resolverMetodoPagoTarifa(pedido) === 'efectivo');
+  const tarifaEfectivo = pedidosEfectivo.reduce((total, pedido) => total + Number(pedido.tarifa_servicio || 0), 0);
+  const comisionEncargoEfectivo = pedidosEfectivo.reduce((total, pedido) => total + Number(pedido.comision_encargo || 0), 0);
+  const porcentajeEmpresa = 1 - PORCENTAJE_REPARTIDOR;
+  const efectivoCobrado = Math.round(tarifaEfectivo * porcentajeEmpresa) + comisionEncargoEfectivo;
+
+  // Para saber quién le debe a quién NO hay que comparar contra el 80% de TODO lo
+  // facturado: en los pedidos que el repartidor cobró en efectivo, él ya se quedó con
+  // su parte en el momento de cobrar, así que ahí no hay nada pendiente de pagarle.
+  // Lo único que la empresa realmente le debe en plata son los pedidos que NO fueron
+  // en efectivo (esos los cobró la empresa, no el repartidor).
+  const tarifaNoEfectivo = totalTarifas - tarifaEfectivo;
+  const montoRepartidorARendir = Math.round(tarifaNoEfectivo * PORCENTAJE_REPARTIDOR);
+
+  const montoNeto = montoRepartidorARendir - efectivoCobrado;
+  const direccionPago = montoNeto >= 0 ? 'empresa_paga' : 'repartidor_paga';
+
+  return {
+    totalTarifas,
+    tarifasPorMetodo,
+    montoRepartidor,
+    comisionPlataforma,
+    efectivoCobrado,
+    montoNeto: Math.abs(montoNeto),
+    direccionPago
+  };
+}
+
 async function calcularResumen(conn, repartidorId, fechaDesde, fechaHasta) {
   const desdeValida = fechaDesde || '2000-01-01 00:00:00';
   const hastaValida = fechaHasta || new Date().toISOString().slice(0, 19).replace('T', ' ');
@@ -35,39 +87,7 @@ async function calcularResumen(conn, repartidorId, fechaDesde, fechaHasta) {
     [repartidorId, desdeValida, hastaValida]
   );
 
-  const totalTarifas = pedidos.reduce((total, pedido) => total + Number(pedido.tarifa_servicio || 0), 0);
-
-  // Solo para mostrar cómo se cobró cada parte de la tarifa — no cambia en
-  // nada el cálculo de abajo (80/20, efectivo a rendir, quién le debe a
-  // quién), que sigue basándose únicamente en tipo_pago === 'efectivo' como
-  // siempre.
-  const tarifasPorMetodo = { efectivo: 0, transferencia: 0, qr: 0, app: 0, sin_definir: 0 };
-  pedidos.forEach(pedido => {
-    const metodo = resolverMetodoPagoTarifa(pedido);
-    tarifasPorMetodo[metodo] += Number(pedido.tarifa_servicio || 0);
-  });
-  const montoRepartidor = Math.round(totalTarifas * PORCENTAJE_REPARTIDOR);
-  const comisionPlataforma = totalTarifas - montoRepartidor;
-
-  // Lo que el repartidor cobró en efectivo y NO le pertenece a él: 20% de la tarifa de esos
-  // pedidos + la comisión de encargo. El monto_compra NO se toca acá: eso es simplemente
-  // la devolución de lo que el repartidor ya puso de su bolsillo, no hay nada que rendir por eso.
-  const pedidosEfectivo = pedidos.filter(pedido => pedido.tipo_pago === 'efectivo');
-  const tarifaEfectivo = pedidosEfectivo.reduce((total, pedido) => total + Number(pedido.tarifa_servicio || 0), 0);
-  const comisionEncargoEfectivo = pedidosEfectivo.reduce((total, pedido) => total + Number(pedido.comision_encargo || 0), 0);
-  const porcentajeEmpresa = 1 - PORCENTAJE_REPARTIDOR;
-  const efectivoCobrado = Math.round(tarifaEfectivo * porcentajeEmpresa) + comisionEncargoEfectivo;
-
-  // Para saber quién le debe a quién NO hay que comparar contra el 80% de TODO lo
-  // facturado: en los pedidos que el repartidor cobró en efectivo, él ya se quedó con
-  // su parte en el momento de cobrar, así que ahí no hay nada pendiente de pagarle.
-  // Lo único que la empresa realmente le debe en plata son los pedidos que NO fueron
-  // en efectivo (esos los cobró la empresa, no el repartidor).
-  const tarifaNoEfectivo = totalTarifas - tarifaEfectivo;
-  const montoRepartidorARendir = Math.round(tarifaNoEfectivo * PORCENTAJE_REPARTIDOR);
-
-  const montoNeto = montoRepartidorARendir - efectivoCobrado;
-  const direccionPago = montoNeto >= 0 ? 'empresa_paga' : 'repartidor_paga';
+  const montos = calcularMontos(pedidos);
 
   // El período real queda definido por los pedidos encontrados: desde el más viejo sin liquidar
   // hasta el corte elegido. Así nunca queda un pedido "en el medio" sin cubrir.
@@ -79,13 +99,13 @@ async function calcularResumen(conn, repartidorId, fechaDesde, fechaHasta) {
     fecha_fin: hastaValida,
     porcentaje_repartidor: 80,
     total_servicios: pedidos.length,
-    total_tarifas: totalTarifas,
-    tarifas_por_metodo: tarifasPorMetodo,
-    monto_repartidor: montoRepartidor,
-    comision_plataforma: comisionPlataforma,
-    efectivo_cobrado: efectivoCobrado,
-    monto_neto: Math.abs(montoNeto),
-    direccion_pago: direccionPago,
+    total_tarifas: montos.totalTarifas,
+    tarifas_por_metodo: montos.tarifasPorMetodo,
+    monto_repartidor: montos.montoRepartidor,
+    comision_plataforma: montos.comisionPlataforma,
+    efectivo_cobrado: montos.efectivoCobrado,
+    monto_neto: montos.montoNeto,
+    direccion_pago: montos.direccionPago,
     pedidos_ids: pedidos.map(pedido => pedido.id),
     pedidos: pedidos.map(pedido => ({
       id: pedido.id,
@@ -261,6 +281,67 @@ router.post('/', async (req, res) => {
     res.status(201).json({ success: true, liquidacion_id: liquidacionId, resumen });
   } catch (error) {
     res.status(400).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// POST /api/liquidaciones/recalcular-pendientes - Vuelve a hacer las cuentas de las
+// liquidaciones que todavía están "pendiente" (nunca las pagadas ni las que tienen un
+// comprobante en revisión), usando la fórmula actual. Sin { "aplicar": true } solo muestra
+// cómo quedarían (vista previa) y no cambia nada. Sirve para corregir liquidaciones que se
+// armaron antes de arreglar el cálculo del efectivo.
+router.post('/recalcular-pendientes', async (req, res) => {
+  let conn;
+  try {
+    const aplicar = !!(req.body && req.body.aplicar === true);
+    conn = await pool.getConnection();
+
+    const [liquidaciones] = await conn.query(
+      `SELECT l.id, l.estado, l.efectivo_cobrado, l.monto_neto, l.direccion_pago, u.nombre
+       FROM liquidaciones l
+       JOIN repartidores r ON l.repartidor_id = r.id
+       JOIN usuarios u ON r.usuario_id = u.id
+       WHERE l.estado = 'pendiente'
+       ORDER BY l.id ASC`
+    );
+
+    const resultado = [];
+    for (const liquidacion of liquidaciones) {
+      const [pedidos] = await conn.query(
+        `SELECT id, tarifa_servicio, comision_encargo, tipo_pago, pago_servicio_retiro, forma_pago_servicio
+         FROM pedidos WHERE liquidacion_id = ?`,
+        [liquidacion.id]
+      );
+      if (pedidos.length === 0) continue;
+
+      const montos = calcularMontos(pedidos);
+      const antes = { direccion_pago: liquidacion.direccion_pago, monto_neto: Number(liquidacion.monto_neto), efectivo_cobrado: Number(liquidacion.efectivo_cobrado) };
+      const despues = { direccion_pago: montos.direccionPago, monto_neto: montos.montoNeto, efectivo_cobrado: montos.efectivoCobrado };
+      const cambia = antes.direccion_pago !== despues.direccion_pago
+        || antes.monto_neto !== despues.monto_neto
+        || antes.efectivo_cobrado !== despues.efectivo_cobrado;
+
+      if (aplicar && cambia) {
+        await conn.query(
+          `UPDATE liquidaciones
+           SET tarifas_por_metodo = ?, efectivo_cobrado = ?, monto_neto = ?, direccion_pago = ?
+           WHERE id = ? AND estado = 'pendiente'`,
+          [JSON.stringify(montos.tarifasPorMetodo), montos.efectivoCobrado, montos.montoNeto, montos.direccionPago, liquidacion.id]
+        );
+      }
+
+      resultado.push({ liquidacion_id: liquidacion.id, nombre: liquidacion.nombre, cambia, antes, despues });
+    }
+
+    res.json({
+      aplicado: aplicar,
+      revisadas: resultado.length,
+      corregidas: resultado.filter(fila => fila.cambia).length,
+      detalle: resultado
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   } finally {
     if (conn) conn.release();
   }
