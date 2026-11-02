@@ -21,14 +21,21 @@ function resolverMetodoPagoTarifa(pedido) {
 // Cuentas de una liquidación a partir de sus pedidos. Está separado de la consulta a la
 // base para poder usar EXACTAMENTE la misma fórmula al calcular una liquidación nueva
 // y al recalcular las pendientes.
+// Lo que cobra JM por el servicio de un pedido: la tarifa más el recargo de centro (si lo
+// tiene). Se cobra junto con la tarifa y de la misma forma, así que entra en el reparto
+// 80% repartidor / 20% JM igual que la tarifa.
+function servicioDe(pedido) {
+  return Number(pedido.tarifa_servicio || 0) + Number(pedido.recargo_centro || 0);
+}
+
 function calcularMontos(pedidos) {
-  const totalTarifas = pedidos.reduce((total, pedido) => total + Number(pedido.tarifa_servicio || 0), 0);
+  const totalTarifas = pedidos.reduce((total, pedido) => total + servicioDe(pedido), 0);
 
   // Cómo se cobró cada parte de la tarifa (se muestra en la liquidación).
   const tarifasPorMetodo = { efectivo: 0, transferencia: 0, qr: 0, app: 0, sin_definir: 0 };
   pedidos.forEach(pedido => {
     const metodo = resolverMetodoPagoTarifa(pedido);
-    tarifasPorMetodo[metodo] += Number(pedido.tarifa_servicio || 0);
+    tarifasPorMetodo[metodo] += servicioDe(pedido);
   });
   const montoRepartidor = Math.round(totalTarifas * PORCENTAJE_REPARTIDOR);
   const comisionPlataforma = totalTarifas - montoRepartidor;
@@ -43,7 +50,7 @@ function calcularMontos(pedidos) {
   // pagó en efectivo al retirar quedaba como "no cobrado por el repartidor": la cuenta salía
   // mal y hasta cambiaba quién le debe a quién.
   const pedidosEfectivo = pedidos.filter(pedido => resolverMetodoPagoTarifa(pedido) === 'efectivo');
-  const tarifaEfectivo = pedidosEfectivo.reduce((total, pedido) => total + Number(pedido.tarifa_servicio || 0), 0);
+  const tarifaEfectivo = pedidosEfectivo.reduce((total, pedido) => total + servicioDe(pedido), 0);
   const comisionEncargoEfectivo = pedidosEfectivo.reduce((total, pedido) => total + Number(pedido.comision_encargo || 0), 0);
   const porcentajeEmpresa = 1 - PORCENTAJE_REPARTIDOR;
   const efectivoCobrado = Math.round(tarifaEfectivo * porcentajeEmpresa) + comisionEncargoEfectivo;
@@ -75,7 +82,7 @@ async function calcularResumen(conn, repartidorId, fechaDesde, fechaHasta) {
   const hastaValida = fechaHasta || new Date().toISOString().slice(0, 19).replace('T', ' ');
 
   const [pedidos] = await conn.query(
-    `SELECT id, tarifa_servicio, monto_compra, comision_encargo, tipo_pago,
+    `SELECT id, tarifa_servicio, recargo_centro, monto_compra, comision_encargo, tipo_pago,
             pago_servicio_retiro, forma_pago_servicio, fecha_creacion
      FROM pedidos
      WHERE repartidor_id = ?
@@ -109,7 +116,7 @@ async function calcularResumen(conn, repartidorId, fechaDesde, fechaHasta) {
     pedidos_ids: pedidos.map(pedido => pedido.id),
     pedidos: pedidos.map(pedido => ({
       id: pedido.id,
-      tarifa_servicio: Number(pedido.tarifa_servicio || 0),
+      tarifa_servicio: servicioDe(pedido),
       tipo_pago: pedido.tipo_pago,
       metodo_pago_tarifa: resolverMetodoPagoTarifa(pedido),
       fecha_creacion: pedido.fecha_creacion
@@ -309,7 +316,7 @@ router.post('/recalcular-pendientes', async (req, res) => {
     const resultado = [];
     for (const liquidacion of liquidaciones) {
       const [pedidos] = await conn.query(
-        `SELECT id, tarifa_servicio, comision_encargo, tipo_pago, pago_servicio_retiro, forma_pago_servicio
+        `SELECT id, tarifa_servicio, recargo_centro, comision_encargo, tipo_pago, pago_servicio_retiro, forma_pago_servicio
          FROM pedidos WHERE liquidacion_id = ?`,
         [liquidacion.id]
       );
