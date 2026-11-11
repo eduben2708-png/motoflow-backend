@@ -53,7 +53,8 @@ router.get('/', async (req, res) => {
               (r.gps_activo AND r.ubicacion_actualizada IS NOT NULL
                AND TIMESTAMPDIFF(SECOND, r.ubicacion_actualizada, NOW()) <= 7200) AS gps_activo,
               r.alias_bancario, r.banco,
-              r.titular_cuenta, r.ci_titular, r.total_entregas, r.calificacion, r.created_at,
+              r.titular_cuenta, r.ci_titular, r.calificacion, r.created_at,
+              (SELECT COUNT(*) FROM pedidos pe WHERE pe.repartidor_id = r.id AND pe.estado = 'entregado') AS total_entregas,
               TIMESTAMPDIFF(SECOND, r.ubicacion_actualizada, NOW()) AS segundos_desde_ubicacion,
               r.color_moto, (r.foto_perfil IS NOT NULL) AS tiene_foto, (r.bloqueado_admin = 1) AS bloqueado_admin,
               (r.foto_actualizada IS NULL OR TIMESTAMPDIFF(DAY, r.foto_actualizada, NOW()) >= ?) AS foto_vencida,
