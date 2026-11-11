@@ -7,6 +7,10 @@ const { idsRepartidoresBloqueados } = require('../utils/bloqueo');
 // valida que realmente sea una imagen en formato data URL y que no sea
 // enorme, para no llenar la base con archivos que no corresponden.
 const TAMANO_MAXIMO_FOTO = 600 * 1024;
+
+// Cada cuántos días el repartidor tiene que sacarse una foto nueva. Pasado ese tiempo
+// desde la última foto, la app se lo recuerda (no se le bloquea nada).
+const DIAS_VALIDEZ_FOTO = 8;
 function validarFoto(foto) {
   if (foto === undefined || foto === null || foto === '') return { ok: true, valor: null };
   if (typeof foto !== 'string' || !/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(foto)) {
@@ -52,11 +56,14 @@ router.get('/', async (req, res) => {
               r.titular_cuenta, r.ci_titular, r.total_entregas, r.calificacion, r.created_at,
               TIMESTAMPDIFF(SECOND, r.ubicacion_actualizada, NOW()) AS segundos_desde_ubicacion,
               r.color_moto, (r.foto_perfil IS NOT NULL) AS tiene_foto, (r.bloqueado_admin = 1) AS bloqueado_admin,
+              (r.foto_actualizada IS NULL OR TIMESTAMPDIFF(DAY, r.foto_actualizada, NOW()) >= ?) AS foto_vencida,
+              TIMESTAMPDIFF(DAY, r.foto_actualizada, NOW()) AS dias_desde_foto,
               UNIX_TIMESTAMP(r.foto_actualizada) AS foto_version,
               u.nombre, u.telefono
        FROM repartidores r
        JOIN usuarios u ON r.usuario_id = u.id
-       ORDER BY r.id DESC`
+       ORDER BY r.id DESC`,
+      [DIAS_VALIDEZ_FOTO]
     );
 
     // Marca a cada repartidor si está bloqueado por no haber pagado lo que
@@ -310,6 +317,35 @@ router.put('/:id/bloqueo', async (req, res) => {
       : [[]];
 
     res.json({ success: true, bloqueado_admin: bloquear, pedidos_activos: pedidosActivos });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// PUT /:id/foto - El propio repartidor actualiza su foto de perfil (se la pide la app
+// cada 8 días). Solo cambia la foto: el resto de sus datos no se toca.
+router.put('/:id/foto', async (req, res) => {
+  let conn;
+  try {
+    const { id } = req.params;
+    const foto = validarFoto(req.body && req.body.foto);
+    if (!foto.ok) {
+      return res.status(400).json({ error: foto.error });
+    }
+    if (!foto.valor) {
+      return res.status(400).json({ error: 'Sacate la foto para poder guardarla' });
+    }
+
+    conn = await pool.getConnection();
+    const [[repartidor]] = await conn.query('SELECT id FROM repartidores WHERE id = ?', [id]);
+    if (!repartidor) {
+      return res.status(404).json({ error: 'Repartidor no encontrado' });
+    }
+
+    await conn.query('UPDATE repartidores SET foto_perfil = ?, foto_actualizada = NOW() WHERE id = ?', [foto.valor, id]);
+    res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   } finally {
