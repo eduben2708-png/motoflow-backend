@@ -51,7 +51,7 @@ router.get('/', async (req, res) => {
               r.alias_bancario, r.banco,
               r.titular_cuenta, r.ci_titular, r.total_entregas, r.calificacion, r.created_at,
               TIMESTAMPDIFF(SECOND, r.ubicacion_actualizada, NOW()) AS segundos_desde_ubicacion,
-              r.color_moto, (r.foto_perfil IS NOT NULL) AS tiene_foto,
+              r.color_moto, (r.foto_perfil IS NOT NULL) AS tiene_foto, (r.bloqueado_admin = 1) AS bloqueado_admin,
               UNIX_TIMESTAMP(r.foto_actualizada) AS foto_version,
               u.nombre, u.telefono
        FROM repartidores r
@@ -278,6 +278,42 @@ router.put('/:id/gps', async (req, res) => {
     res.json({ success: true, message: 'GPS actualizado' });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /:id/bloqueo - El administrador bloquea o desbloquea a un repartidor a mano.
+// Bloqueado: no se le asignan pedidos (ni automática ni manualmente), su GPS se apaga y la
+// app no lo deja usar su cuenta. No se borra nada: el historial y las liquidaciones quedan.
+// Devuelve los pedidos que tenía en curso para que el administrador los reasigne.
+router.put('/:id/bloqueo', async (req, res) => {
+  let conn;
+  try {
+    const { id } = req.params;
+    const bloquear = req.body && req.body.bloqueado === true;
+
+    conn = await pool.getConnection();
+    const [[repartidor]] = await conn.query('SELECT id FROM repartidores WHERE id = ?', [id]);
+    if (!repartidor) {
+      return res.status(404).json({ error: 'Repartidor no encontrado' });
+    }
+
+    await conn.query(
+      'UPDATE repartidores SET bloqueado_admin = ?, gps_activo = IF(?, FALSE, gps_activo) WHERE id = ?',
+      [bloquear ? 1 : 0, bloquear ? 1 : 0, id]
+    );
+
+    const [pedidosActivos] = bloquear
+      ? await conn.query(
+        "SELECT id, estado FROM pedidos WHERE repartidor_id = ? AND estado IN ('asignado', 'en_retiro', 'en_camino') ORDER BY id",
+        [id]
+      )
+      : [[]];
+
+    res.json({ success: true, bloqueado_admin: bloquear, pedidos_activos: pedidosActivos });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (conn) conn.release();
   }
 });
 

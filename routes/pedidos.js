@@ -281,6 +281,7 @@ async function asignarRepartidorAutomatico(conn, pedidoId, origenLat, origenLng,
               TIMESTAMPDIFF(SECOND, r.ubicacion_actualizada, NOW()) AS segundos_ubicacion
        FROM repartidores r
        WHERE r.estado_aprobacion = 'aprobado'
+         AND r.bloqueado_admin = 0
          AND r.gps_activo = TRUE
          AND r.ubicacion_actualizada IS NOT NULL
          AND TIMESTAMPDIFF(SECOND, r.ubicacion_actualizada, NOW()) <= ?
@@ -774,13 +775,16 @@ router.put('/:id', async (req, res) => {
       if (Number(pedidoActual.repartidor_id) !== Number(repartidor_id)) {
         cambiaRepartidor = true;
         const [[destino]] = await conn.query(
-          `SELECT estado_aprobacion, gps_activo,
+          `SELECT estado_aprobacion, gps_activo, bloqueado_admin,
                   TIMESTAMPDIFF(SECOND, ubicacion_actualizada, NOW()) AS segundos_desde_ubicacion
            FROM repartidores WHERE id = ?`,
           [repartidor_id]
         );
         if (!destino || destino.estado_aprobacion !== 'aprobado') {
           return res.status(400).json({ error: 'Ese repartidor no existe o no está aprobado.' });
+        }
+        if (Number(destino.bloqueado_admin) === 1) {
+          return res.status(400).json({ error: 'Ese repartidor está bloqueado. Desbloquealo desde Repartidores para asignarle pedidos.' });
         }
         const ubicacionVigente = destino.segundos_desde_ubicacion !== null && Number(destino.segundos_desde_ubicacion) <= 7200;
         if (!destino.gps_activo || !ubicacionVigente) {

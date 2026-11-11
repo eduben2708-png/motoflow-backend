@@ -129,7 +129,10 @@ async function inicializarTablasDB() {
     const columnasNuevas = [
       ['color_moto', 'VARCHAR(30) NULL'],
       ['foto_perfil', 'MEDIUMTEXT NULL'],
-      ['foto_actualizada', 'TIMESTAMP NULL']
+      ['foto_actualizada', 'TIMESTAMP NULL'],
+      // Bloqueo manual del administrador (distinto del bloqueo automático por deuda):
+      // 1 = el repartidor no recibe pedidos ni puede usar la app hasta que se lo desbloquee.
+      ['bloqueado_admin', 'TINYINT(1) NOT NULL DEFAULT 0']
     ];
     for (const [nombre, tipo] of columnasNuevas) {
       try {
